@@ -11,6 +11,7 @@ import csv
 from urllib.parse import urlparse
 import time
 import logging
+import re
 
 logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
@@ -41,6 +42,16 @@ def is_valid_archive_content(folder):
         if f.suffix.lower() in bad_exts:
             return False
     return any(f.suffix.lower() in allowed_exts for f in files)
+
+
+def clean_file_name(name: str) -> str:
+    """Remove dates, timestamps, and symbols from a filename stem."""
+    name = re.sub(r"\d{4}[-_\.]\d{2}[-_\.]\d{2}", " ", name)  # YYYY-MM-DD or similar
+    name = re.sub(r"\d{2}[-_\.]\d{2}[-_\.]\d{4}", " ", name)  # DD-MM-YYYY or MM-DD-YYYY
+    name = re.sub(r"\d{8,14}", " ", name)  # Compact dates or timestamps
+    name = re.sub(r"\b(19|20)\d{2}\b", " ", name)  # Year alone
+    name = re.sub(r"[^0-9a-zA-Z]+", " ", name)  # Replace symbols with spaces
+    return re.sub(r"\s+", " ", name).strip()
 
 def get_tokenizer(model):
     # GPT-4.1 and friends use cl100k_base; update as needed for other future models
@@ -101,17 +112,17 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
                 continue
 
             # Put the base name (stem) of the file at the front, then add all contained names
-            base_name = path.stem  # File name without extension
+            base_name = clean_file_name(path.stem)
             contained_names = " ".join(
-                f.name
+                clean_file_name(f.stem)
                 for f in temp_dir.rglob("*")
                 if f.is_file() and f.suffix.lower() != ".txt"
             )
             joined_names = f"{base_name} {contained_names}".strip()
 
-            query = f"{prompt}\n{joined_names}"
-
-            results = collection.query(query_texts=[query], n_results=50)
+            # Use a concise query for vector DB lookup based only on file names.
+            vector_query = joined_names[:200]  # trim to keep query short
+            results = collection.query(query_texts=[vector_query], n_results=50)
             documents = results["documents"][0]
             distances = results["distances"][0]
 
