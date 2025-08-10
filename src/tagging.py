@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import patoolib
 from chromadb import PersistentClient
-import openai
+from openai import OpenAI
 import tiktoken  # Optional token estimation
 import csv
 from urllib.parse import urlparse
@@ -14,6 +14,9 @@ import logging
 import re
 
 logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+
+# Initialize the OpenAI client using environment variables for configuration
+client = OpenAI()
 
 def extract_to_temp(file_path):
     temp_dir = Path(tempfile.mkdtemp())
@@ -70,7 +73,7 @@ def ask_openai(prompt, model="gpt-4.1", retries=3):
     prompt_tokens = len(enc.encode(prompt))
     for attempt in range(retries):
         try:
-            response = openai.ChatCompletion.create(
+            response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a miniature tagging assistant."},
@@ -79,8 +82,9 @@ def ask_openai(prompt, model="gpt-4.1", retries=3):
                 temperature=0.3,
                 max_tokens=150
             )
-            completion_tokens = len(enc.encode(response.choices[0].message["content"]))
-            return response.choices[0].message["content"], prompt_tokens + completion_tokens
+            completion_text = response.choices[0].message.content
+            completion_tokens = len(enc.encode(completion_text))
+            return completion_text, prompt_tokens + completion_tokens
         except Exception as e:
             print(f"[OpenAI Retry {attempt + 1}] Error: {e}")
             if attempt == retries - 1:
