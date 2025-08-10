@@ -11,6 +11,7 @@ import csv
 from urllib.parse import urlparse
 import time
 import logging
+import re
 
 logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
@@ -41,6 +42,16 @@ def is_valid_archive_content(folder):
         if f.suffix.lower() in bad_exts:
             return False
     return any(f.suffix.lower() in allowed_exts for f in files)
+
+
+def clean_file_name(name: str) -> str:
+    """Remove dates, timestamps, and symbols from a filename stem."""
+    name = re.sub(r"\d{4}[-_\.]\d{2}[-_\.]\d{2}", " ", name)  # YYYY-MM-DD or similar
+    name = re.sub(r"\d{2}[-_\.]\d{2}[-_\.]\d{4}", " ", name)  # DD-MM-YYYY or MM-DD-YYYY
+    name = re.sub(r"\d{8,14}", " ", name)  # Compact dates or timestamps
+    name = re.sub(r"\b(19|20)\d{2}\b", " ", name)  # Year alone
+    name = re.sub(r"[^0-9a-zA-Z]+", " ", name)  # Replace symbols with spaces
+    return re.sub(r"\s+", " ", name).strip()
 
 def get_tokenizer(model):
     # GPT-4.1 and friends use cl100k_base; update as needed for other future models
@@ -101,15 +112,15 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
                 continue
 
             # Put the base name (stem) of the file at the front, then add all contained names
-            base_name = path.stem  # File name without extension
+            base_name = clean_file_name(path.stem)
             contained_names = " ".join(
-                f.name
+                clean_file_name(f.stem)
                 for f in temp_dir.rglob("*")
                 if f.is_file() and f.suffix.lower() != ".txt"
             )
             joined_names = f"{base_name} {contained_names}".strip()
 
-            query = f"{prompt}\n{joined_names}"
+            # Use a concise query for vector DB lookup based only on file names.
 
             # Normalize base name to improve substring matching
             normalized_base_name = base_name.replace("_", " ").replace("-", " ")
@@ -117,7 +128,7 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
             # Retrieve candidate chunks from the vector DB that mention the base name.
             # Fall back to the unfiltered query if none are found.
             results = collection.query(
-                query_texts=[query],
+                query_texts=[joined_names],
                 n_results=50,
                 where_document={"$contains": normalized_base_name},
             )
@@ -126,7 +137,7 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
             filtered = bool(documents)
             if not documents:
                 results = collection.query(
-                    query_texts=[query],
+                    query_texts=[joined_names],
                     n_results=50,
                 )
                 documents = results["documents"][0]
@@ -149,7 +160,7 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
                 context_chunks.append(doc)
 
             context = "\n".join(context_chunks)
-            full_prompt = f"{prompt}\n\nLore context:\n{context}\n\n"
+            full_prompt = f"{prompt}\n\nThe primary subject in question is \"{normalized_base_name}\".\n\nSecondary subjects could include \"{joined_names}\"\n\n Lore context follows until the end of this message:\n{context}\n\n"
             tags, token_count = ask_openai(full_prompt)
 
             if tags.strip().lower() == "unknown":
