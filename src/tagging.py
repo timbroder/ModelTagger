@@ -138,6 +138,9 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
                 doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
             ]
 
+            if not confident_docs:
+                confident_docs = [documents[0]]
+
             context_chunks = []
             token_budget = 3000
             for doc in confident_docs:
