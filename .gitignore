@@ -2,3 +2,12 @@
 .idea
 src/__pycache__
 .DS_Store
+tools/all_pages.txt
+warhammer_db
+warhammer_db copy
+warhammer_db1
+files
+seeds
+lore
+*.log
+*.csv
