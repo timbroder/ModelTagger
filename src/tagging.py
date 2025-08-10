@@ -111,13 +111,32 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
 
             query = f"{prompt}\n{joined_names}"
 
-            results = collection.query(query_texts=[query], n_results=50)
+            # Normalize base name to improve substring matching
+            normalized_base_name = base_name.replace("_", " ").replace("-", " ")
+
+            # Retrieve candidate chunks from the vector DB that mention the base name.
+            # Fall back to the unfiltered query if none are found.
+            results = collection.query(
+                query_texts=[query],
+                n_results=50,
+                where_document={"$contains": normalized_base_name},
+            )
             documents = results["documents"][0]
             distances = results["distances"][0]
+            filtered = bool(documents)
+            if not documents:
+                results = collection.query(
+                    query_texts=[query],
+                    n_results=50,
+                )
+                documents = results["documents"][0]
+                distances = results["distances"][0]
 
-            # Only keep docs above confidence (adjust threshold as needed)
-            confidence_threshold = 0.15
-            confident_docs = [doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold]
+            # Adjust confidence depending on whether the base-name filter hit.
+            confidence_threshold = 0.2 if filtered else 0.1
+            confident_docs = [
+                doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
+            ]
 
             context_chunks = []
             token_budget = 3000
