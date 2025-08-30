@@ -2,7 +2,7 @@ import json
 import chromadb
 import tiktoken
 import spacy
-
+import re
 
 def semantic_chunk_text(
     text: str,
@@ -51,6 +51,8 @@ def semantic_chunk_text(
                 end += 1
 
         chunk = " ".join(sentences[start:end]).strip()
+        chunk = re.sub(r"\s+", " ", chunk)  # Normalize whitespace
+
         if chunk and chunk not in seen:
             chunks.append(chunk)
             seen.add(chunk)
