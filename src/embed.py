@@ -2,8 +2,11 @@ import json
 import chromadb
 import tiktoken
 
-def chunk_text(text, max_tokens=500, model="gpt-5"):
-    enc = tiktoken.get_encoding("cl100k_base")
+def semantic_chunk_text(text, max_tokens=500, model="gpt-5"):
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
     paragraphs = text.split('\n')
     chunks = []
     current_chunk = ""
@@ -39,7 +42,7 @@ def run_embedding(input_path, vector_db_path, model="gpt-5"):
         url = doc['url']
         if not text.strip():
             continue
-        for idx, chunk in enumerate(chunk_text(text, max_tokens=500, model=model)):
+        for idx, chunk in enumerate(semantic_chunk_text(text, max_tokens=500, model=model)):
             chunk_id = f"{url}#chunk{idx}"
             collection.add(
                 documents=[chunk],
