@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 
 def scrape_url(args):
@@ -110,7 +111,9 @@ def run_scraping(seed_file, output_path, max_pages=100, max_depth=2, max_threads
                         and ext not in image_extensions):
                     queue.append((link, 0))  # Reset depth for new links
 
-    with ThreadPoolExecutor(max_threads) as executor:
+    with ThreadPoolExecutor(max_threads) as executor, tqdm(
+            total=max_pages, initial=len(visited), desc="Scraping"
+    ) as pbar:
         future_to_url = {}
         processed_count = 0
         while queue and len(visited) < max_pages:
@@ -125,8 +128,9 @@ def run_scraping(seed_file, output_path, max_pages=100, max_depth=2, max_threads
                     queue.extend(new_links)
                 del future_to_url[future]
 
-                # Increment processed count and save progress at intervals
+                # Increment processed count, update progress bar, and save progress at intervals
                 processed_count += 1
+                pbar.update(1)
                 if processed_count % save_interval == 0:
                     save_progress(output_path, results)
                     results.clear()  # Clear the results list as they are now saved
