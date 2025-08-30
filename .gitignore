@@ -11,3 +11,4 @@ seeds
 lore
 *.log
 *.csv
+tools/unique_urls.txt
