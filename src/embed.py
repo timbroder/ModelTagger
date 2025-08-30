@@ -3,6 +3,7 @@ import chromadb
 import tiktoken
 import spacy
 import re
+from tqdm import tqdm
 
 def semantic_chunk_text(
     text: str,
@@ -80,17 +81,25 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
     with open(input_path) as f:
         documents = json.load(f)
 
+    prepared = []
+    total_chunks = 0
     for doc in documents:
         text = doc["text"]
         url = doc["url"]
         if not text.strip():
             continue
         chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
-        for idx, chunk in enumerate(chunks):
-            chunk_id = f"{url}#chunk{idx}"
-            collection.add(
-                documents=[chunk],
-                metadatas=[{"source": url, "chunk": idx}],
-                ids=[chunk_id],
-            )
+        prepared.append((url, chunks))
+        total_chunks += len(chunks)
+
+    with tqdm(total=total_chunks, desc="Embedding") as pbar:
+        for url, chunks in prepared:
+            for idx, chunk in enumerate(chunks):
+                chunk_id = f"{url}#chunk{idx}"
+                collection.add(
+                    documents=[chunk],
+                    metadatas=[{"source": url, "chunk": idx}],
+                    ids=[chunk_id],
+                )
+                pbar.update(1)
 
