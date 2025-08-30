@@ -20,7 +20,10 @@ def semantic_chunk_text(
     duplicate chunks.
     """
 
-    enc = tiktoken.get_encoding("cl100k_base")
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
     # Lightweight sentence boundary detection without requiring a large model
     nlp = spacy.blank("en")
     if "sentencizer" not in nlp.pipe_names:
