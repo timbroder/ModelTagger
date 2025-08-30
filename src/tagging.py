@@ -56,7 +56,10 @@ def clean_file_name(name: str) -> str:
 def get_tokenizer(model):
     # GPT-4.1 and friends use cl100k_base; update as needed for other future models
     if model in ("gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4", "gpt-3.5-turbo"):
-        return tiktoken.get_encoding("cl100k_base")
+        try:
+            return tiktoken.encoding_for_model(model)
+        except KeyError:
+            return tiktoken.get_encoding("cl100k_base")
     else:
         return tiktoken.encoding_for_model(model)
 

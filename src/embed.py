@@ -1,36 +1,77 @@
 import json
 import chromadb
 import tiktoken
+import spacy
 
-def semantic_chunk_text(text, max_tokens=500, model="gpt-5"):
+
+def semantic_chunk_text(
+    text: str,
+    min_tokens: int = 300,
+    max_tokens: int = 800,
+    overlap_ratio: float = 0.2,
+    model: str = "gpt-5",
+):
+    """Split ``text`` into semantically meaningful chunks.
+
+    The chunker produces segments between ``min_tokens`` and ``max_tokens`` using
+    sentence boundaries. Chunks are generated with a sliding window so that each
+    chunk shares an overlapping portion of the previous chunk. The overlap is
+    "semantic" in that it respects sentence boundaries and avoids returning
+    duplicate chunks.
+    """
+
     try:
         enc = tiktoken.encoding_for_model(model)
     except KeyError:
         enc = tiktoken.get_encoding("cl100k_base")
-    paragraphs = text.split('\n')
+    # Lightweight sentence boundary detection without requiring a large model
+    nlp = spacy.blank("en")
+    if "sentencizer" not in nlp.pipe_names:
+        nlp.add_pipe("sentencizer")
+
+    doc = nlp(text)
+    sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+    token_counts = [len(enc.encode(sent)) for sent in sentences]
+
     chunks = []
-    current_chunk = ""
-    current_tokens = 0
+    seen = set()
+    start = 0
+    while start < len(sentences):
+        current_tokens = 0
+        end = start
+        # Grow the chunk until reaching max_tokens
+        while end < len(sentences) and current_tokens + token_counts[end] <= max_tokens:
+            current_tokens += token_counts[end]
+            end += 1
 
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-        para_tokens = len(enc.encode(para))
-        # If adding this paragraph would exceed the max, start new chunk
-        if current_tokens + para_tokens > max_tokens and current_chunk:
-            chunks.append(current_chunk.strip())
-            current_chunk = para
-            current_tokens = para_tokens
-        else:
-            current_chunk += "\n" + para
-            current_tokens += para_tokens
+        # Ensure minimum token length when possible
+        if current_tokens < min_tokens and end < len(sentences):
+            while end < len(sentences) and current_tokens < min_tokens:
+                current_tokens += token_counts[end]
+                end += 1
 
-    if current_chunk:
-        chunks.append(current_chunk.strip())
+        chunk = " ".join(sentences[start:end]).strip()
+        if chunk and chunk not in seen:
+            chunks.append(chunk)
+            seen.add(chunk)
+
+        if end >= len(sentences):
+            break
+
+        # Determine new start index based on overlap_ratio
+        target_overlap = int(overlap_ratio * current_tokens)
+        overlap = 0
+        new_start = end
+        while new_start > start and overlap < target_overlap:
+            new_start -= 1
+            overlap += token_counts[new_start]
+
+        start = new_start
+
     return chunks
 
-def run_embedding(input_path, vector_db_path, model="gpt-5"):
+
+def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
     client = chromadb.PersistentClient(path=vector_db_path)
     collection = client.get_or_create_collection(name="lore")
 
@@ -38,15 +79,16 @@ def run_embedding(input_path, vector_db_path, model="gpt-5"):
         documents = json.load(f)
 
     for doc in documents:
-        text = doc['text']
-        url = doc['url']
+        text = doc["text"]
+        url = doc["url"]
         if not text.strip():
             continue
-        for idx, chunk in enumerate(semantic_chunk_text(text, max_tokens=500, model=model)):
+        chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
+        for idx, chunk in enumerate(chunks):
             chunk_id = f"{url}#chunk{idx}"
             collection.add(
                 documents=[chunk],
-                metadatas=[{'source': url, 'chunk': idx}],
-                ids=[chunk_id]
+                metadatas=[{"source": url, "chunk": idx}],
+                ids=[chunk_id],
             )
 
