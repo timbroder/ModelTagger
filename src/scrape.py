@@ -112,7 +112,7 @@ def run_scraping(seed_file, output_path, max_pages=100, max_depth=2, max_threads
                     queue.append((link, 0))  # Reset depth for new links
 
     with ThreadPoolExecutor(max_threads) as executor, tqdm(
-            total=max_pages, initial=len(visited), desc="Scraping"
+            total=len(seeds), initial=len(visited), desc="Scraping"
     ) as pbar:
         future_to_url = {}
         processed_count = 0
