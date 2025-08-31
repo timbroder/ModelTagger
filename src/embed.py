@@ -69,7 +69,11 @@ def semantic_chunk_text(
             new_start -= 1
             overlap += token_counts[new_start]
 
-        start = new_start
+        # Ensure progress to avoid infinite loop
+        if new_start >= end or new_start == start:
+            start = end
+        else:
+            start = new_start
 
     return chunks
 
@@ -86,14 +90,16 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
 
     prepared = []
     total_chunks = 0
-    for doc in tqdm(documents, desc="Pre Embedding"):
-        text = doc["text"]
-        url = doc["url"]
-        if not text.strip():
-            continue
-        chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
-        prepared.append((url, chunks))
-        total_chunks += len(chunks)
+    with tqdm(total=len(documents), desc="Pre Embedding") as pbar:
+        for doc in documents:
+            text = doc["text"]
+            url = doc["url"]
+            if not text.strip():
+                continue
+            chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
+            prepared.append((url, chunks))
+            total_chunks += len(chunks)
+            pbar.update(1)
 
     with tqdm(total=total_chunks, desc="Embedding") as pbar:
         for url, chunks in prepared:
