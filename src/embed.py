@@ -86,7 +86,7 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
 
     prepared = []
     total_chunks = 0
-    for doc in documents:
+    for doc in tqdm(documents, desc="Pre Embedding"):
         text = doc["text"]
         url = doc["url"]
         if not text.strip():
