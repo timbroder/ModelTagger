@@ -131,6 +131,15 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
 
             # Normalize base name to improve substring matching
             normalized_base_name = base_name.replace("_", " ").replace("-", " ")
+            # Deduplicate words in normalized_base_name
+            words = normalized_base_name.split()
+            deduped_words = []
+            seen = set()
+            for word in words:
+                if word not in seen:
+                    deduped_words.append(word)
+                    seen.add(word)
+            normalized_base_name = " ".join(deduped_words)
 
             # Retrieve candidate chunks from the vector DB that mention the base name.
             # Fall back to the unfiltered query if none are found.

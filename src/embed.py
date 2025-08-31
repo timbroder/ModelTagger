@@ -76,7 +76,10 @@ def semantic_chunk_text(
 
 def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
     client = chromadb.PersistentClient(path=vector_db_path)
-    collection = client.get_or_create_collection(name="lore")
+    collection = client.get_or_create_collection(
+        name="lore",
+        metadata={"hnsw:space": "cosine"},
+    )
 
     with open(input_path) as f:
         documents = json.load(f)
