@@ -81,7 +81,11 @@ pip install sentence-transformers torch
 pip install transformers
 
 # run local LLM (the script will pull the model if missing)
-brew install ollama || curl -fsSL https://ollama.com/install.sh | sh
+# macOS (via Homebrew)
+brew install ollama
+# Linux
+curl -fsSL https://ollama.com/install.sh | sh
+# start the Ollama service
 ollama serve
 ```
 
