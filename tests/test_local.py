@@ -110,3 +110,47 @@ def test_rerank(tmp_path, monkeypatch):
 
     prompt = mock_post.call_args[1]["json"]["prompt"]
     assert prompt.find("doc2") < prompt.find("doc1")
+
+
+def test_tagging_appends(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "m.stl").write_text("mesh")
+    out_csv = tmp_path / "tags.csv"
+    vector_path = tmp_path / "db"
+
+    mock_col = MagicMock()
+    mock_col.query.return_value = {"documents": [["lore1", "lore2"]], "distances": [[0.05, 0.1]]}
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+
+    class DummyPull:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {}
+
+    class DummyGen:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"response": "tag1, tag2"}
+
+    def post_side_effect(url, *args, **kwargs):
+        if url.endswith("/api/pull"):
+            return DummyPull()
+        return DummyGen()
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.requests.get") as mock_get, \
+            patch("tagging.requests.post", side_effect=post_side_effect) as mock_post, \
+            patch("tagging.count_tokens", side_effect=lambda text, model=None: len(text)):
+        mock_get.return_value.raise_for_status = lambda: None
+        mock_get.return_value.json.return_value = {"models": []}
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
+        run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
+
+    rows = list(csv.reader(open(out_csv)))
+    assert len(rows) == 3
