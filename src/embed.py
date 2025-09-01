@@ -3,7 +3,10 @@ import chromadb
 import tiktoken
 import spacy
 import re
+from urllib.parse import urlparse
 from tqdm import tqdm
+
+from utils import slugify
 
 def semantic_chunk_text(
     text: str,
@@ -97,17 +100,18 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
             if not text.strip():
                 continue
             chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
-            prepared.append((url, chunks))
+            slug = slugify(urlparse(url).path.rstrip("/").split("/")[-1])
+            prepared.append((url, slug, chunks))
             total_chunks += len(chunks)
             pbar.update(1)
 
     with tqdm(total=total_chunks, desc="Embedding") as pbar:
-        for url, chunks in prepared:
+        for url, slug, chunks in prepared:
             for idx, chunk in enumerate(chunks):
                 chunk_id = f"{url}#chunk{idx}"
                 collection.add(
                     documents=[chunk],
-                    metadatas=[{"source": url, "chunk": idx}],
+                    metadatas=[{"source": url, "slug": slug, "chunk": idx}],
                     ids=[chunk_id],
                 )
                 pbar.update(1)
