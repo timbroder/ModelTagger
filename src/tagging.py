@@ -146,9 +146,11 @@ def run_tagging(
     client = PersistentClient(path=vector_db_path)
     collection = client.get_or_create_collection(name="lore")
 
-    with open(output_csv, 'w', newline='') as f:
+    file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
+    with open(output_csv, 'a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["filename", "tags"])
+        if not file_exists:
+            writer.writerow(["filename", "tags"])
 
         for path in Path(zips_dir).iterdir():
             if path.suffix.lower() not in [".zip", ".rar", ".7z", ".stl", ".obj", ".png"]:
