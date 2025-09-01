@@ -183,25 +183,51 @@ def run_tagging(
             normalized_base_name = " ".join(deduped_words)
 
             slugified_term = slugify(normalized_base_name)
+            superset = {}
 
             # Retrieve candidate chunks from the vector DB that mention the base name.
             # Fall back to the unfiltered query if none are found.
             results = collection.query(
                 query_texts=[joined_names],
-                n_results=50,
+                n_results=10,
                 where_document={"$contains": normalized_base_name},
                 where={"slug": {"$eq": slugified_term}},
             )
+
             documents = results["documents"][0]
             distances = results["distances"][0]
+
+            if documents:
+                superset[distances[0]] = results
+
+            results = collection.query(
+                query_texts=[joined_names],
+                n_results=10,
+                where_document={"$contains": normalized_base_name},
+            )
+
+            documents = results["documents"][0]
+            distances = results["distances"][0]
+
+            if documents:
+                superset[distances[0]] = results
+
             if not documents:
                 results = collection.query(
                     query_texts=[joined_names],
-                    n_results=50,
+                    n_results=10,
                 )
+
                 documents = results["documents"][0]
                 distances = results["distances"][0]
 
+                superset[distances[0]] = results
+
+            min_results = superset[min(superset.keys())]
+            documents = results["documents"][0]
+            distances = results["distances"][0]
+
+            # Choose the best result set based on the closest distance
             if rerank:
                 from sentence_transformers import CrossEncoder
                 ce = CrossEncoder(rerank_model)
@@ -210,7 +236,7 @@ def run_tagging(
                 confident_docs = ranked[:8]
             else:
                 filtered = bool(documents)
-                confidence_threshold = 0.2 if filtered else 0.1
+                confidence_threshold = 0.3 if filtered else 0.1
                 confident_docs = [
                     doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
                 ]
