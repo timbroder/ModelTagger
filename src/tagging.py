@@ -166,8 +166,16 @@ def run_tagging(
 
     client = PersistentClient(path=vector_db_path)
     collection = client.get_or_create_collection(name="lore")
-
     file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
+    processed = set()
+    if file_exists:
+        with open(output_csv, newline="") as rf:
+            reader = csv.reader(rf)
+            next(reader, None)
+            for row in reader:
+                if row:
+                    processed.add(row[0])
+
     with open(output_csv, 'a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
@@ -176,138 +184,152 @@ def run_tagging(
         for path in Path(zips_dir).iterdir():
             if path.suffix.lower() not in [".zip", ".rar", ".7z", ".stl", ".obj", ".png"]:
                 continue
-
-            temp_dir = extract_to_temp(path)
-            if not temp_dir or not is_valid_archive_content(temp_dir):
-                print(f"Skipping {path.name} — invalid content")
+            if path.name in processed:
                 continue
 
-            # Put the base name (stem) of the file at the front, then add all contained names
-            base_name = clean_file_name(path.stem)
-            contained_names = " ".join(
-                clean_file_name(f.stem)
-                for f in temp_dir.rglob("*")
-                if f.is_file() and f.suffix.lower() != ".txt"
-            )
-            joined_names = f"{base_name} {contained_names}".strip()
+            temp_dir = None
+            try:
+                temp_dir = extract_to_temp(path)
+                if not temp_dir or not is_valid_archive_content(temp_dir):
+                    print(f"Skipping {path.name} — invalid content")
+                    writer.writerow([path.name, ""])
+                    processed.add(path.name)
+                    continue
 
-            # Use a concise query for vector DB lookup based only on file names.
+                # Put the base name (stem) of the file at the front, then add all contained names
+                base_name = clean_file_name(path.stem)
+                contained_names = " ".join(
+                    clean_file_name(f.stem)
+                    for f in temp_dir.rglob("*")
+                    if f.is_file() and f.suffix.lower() != ".txt"
+                )
+                joined_names = f"{base_name} {contained_names}".strip()
 
-            # Normalize base name to improve substring matching
-            normalized_base_name = base_name.replace("_", " ").replace("-", " ")
-            # Deduplicate words in normalized_base_name
-            words = normalized_base_name.split()
-            deduped_words = []
-            seen = set()
-            for word in words:
-                if word not in seen:
-                    deduped_words.append(word)
-                    seen.add(word)
-            normalized_base_name = " ".join(deduped_words)
+                # Use a concise query for vector DB lookup based only on file names.
 
-            slugified_term = slugify(normalized_base_name)
-            superset = {}
+                # Normalize base name to improve substring matching
+                normalized_base_name = base_name.replace("_", " ").replace("-", " ")
+                # Deduplicate words in normalized_base_name
+                words = normalized_base_name.split()
+                deduped_words = []
+                seen = set()
+                for word in words:
+                    if word not in seen:
+                        deduped_words.append(word)
+                        seen.add(word)
+                normalized_base_name = " ".join(deduped_words)
 
-            # Retrieve candidate chunks from the vector DB that mention the base name.
-            # Fall back to the unfiltered query if none are found.
-            results = collection.query(
-                query_texts=[joined_names],
-                n_results=10,
-                where_document={"$contains": normalized_base_name},
-                where={"slug": {"$eq": slugified_term}},
-            )
+                slugified_term = slugify(normalized_base_name)
+                superset = {}
 
-            documents = results["documents"][0]
-            distances = results["distances"][0]
-
-            if documents:
-                superset[distances[0]] = results
-
-            results = collection.query(
-                query_texts=[joined_names],
-                n_results=10,
-                where_document={"$contains": normalized_base_name},
-            )
-
-            documents = results["documents"][0]
-            distances = results["distances"][0]
-
-            if documents:
-                superset[distances[0]] = results
-
-            if not documents:
+                # Retrieve candidate chunks from the vector DB that mention the base name.
+                # Fall back to the unfiltered query if none are found.
                 results = collection.query(
                     query_texts=[joined_names],
                     n_results=10,
+                    where_document={"$contains": normalized_base_name},
+                    where={"slug": {"$eq": slugified_term}},
                 )
 
                 documents = results["documents"][0]
                 distances = results["distances"][0]
 
-                superset[distances[0]] = results
+                if documents:
+                    superset[distances[0]] = results
 
-            min_results = superset[min(superset.keys())]
-            documents = results["documents"][0]
-            distances = results["distances"][0]
-
-            # Choose the best result set based on the closest distance
-            if rerank:
-                from sentence_transformers import CrossEncoder
-                ce = CrossEncoder(rerank_model)
-                scores = ce.predict([(joined_names, d) for d in documents])
-                ranked = [d for d, _ in sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)]
-                confident_docs = ranked[:8]
-            else:
-                filtered = bool(documents)
-                confidence_threshold = 0.3 if filtered else 0.1
-                confident_docs = [
-                    doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
-                ]
-                if not confident_docs:
-                    confident_docs = [documents[0]]
-
-            chosen_model = local_model if use_local else model
-            prompt_tokens = count_tokens(prompt, model=chosen_model)
-            context_budget = token_budget - prompt_tokens - 300
-            current = 0
-            context_chunks = []
-            for doc in confident_docs:
-                t = count_tokens(doc, model=chosen_model)
-                if current + t > context_budget:
-                    break
-                context_chunks.append(doc)
-                current += t
-
-            context = "\n".join(context_chunks)
-            full_prompt = (
-                f"{prompt}\n\nThe primary subject in question is \"{normalized_base_name}\".\n\n"
-                f"Secondary subjects could include \"{joined_names}\"\n\n"
-                f"Lore context follows until the end of this message:\n{context}\n\n"
-            )
-
-            if use_local:
-                tags = ask_local_model(full_prompt, local_model)
-                token_count = prompt_tokens + count_tokens(tags, model=chosen_model)
-            else:
-                tags, token_count = ask_openai(full_prompt, model=model)
-
-            if tags.strip().lower() == "unknown":
-                print(f"[Fallback] Generation failed for {path.name}. Using Chroma document snippets.")
-                logging.warning(f"Fallback to Chroma for {path.name}")
-                tag_result = [doc[:50] for doc in documents[:5]]
-                writer.writerow([path.name, ", ".join(tag_result)])
-                shutil.rmtree(temp_dir)
-                continue
-
-            tag_result = parse_tags(tags)
-            writer.writerow([path.name, ", ".join(tag_result)])
-            if use_local:
-                print(f"Tagged {path.name} [local] using ~{token_count} tokens")
-                logging.info(f"Tagged {path.name} | Tokens: {token_count} | local mode")
-            else:
-                cost_estimate = token_count / 1000 * 0.01
-                print(f"Tagged {path.name} using ~{token_count} tokens (${cost_estimate:.4f})")
-                logging.info(
-                    f"Tagged {path.name} | Tokens: {token_count} | Cost: ${cost_estimate:.4f}"
+                results = collection.query(
+                    query_texts=[joined_names],
+                    n_results=10,
+                    where_document={"$contains": normalized_base_name},
                 )
-            shutil.rmtree(temp_dir)
+
+                documents = results["documents"][0]
+                distances = results["distances"][0]
+
+                if documents:
+                    superset[distances[0]] = results
+
+                if not documents:
+                    results = collection.query(
+                        query_texts=[joined_names],
+                        n_results=10,
+                    )
+
+                    documents = results["documents"][0]
+                    distances = results["distances"][0]
+
+                    superset[distances[0]] = results
+
+                min_results = superset[min(superset.keys())]
+                documents = results["documents"][0]
+                distances = results["distances"][0]
+
+                # Choose the best result set based on the closest distance
+                if rerank:
+                    from sentence_transformers import CrossEncoder
+                    ce = CrossEncoder(rerank_model)
+                    scores = ce.predict([(joined_names, d) for d in documents])
+                    ranked = [d for d, _ in sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)]
+                    confident_docs = ranked[:8]
+                else:
+                    filtered = bool(documents)
+                    confidence_threshold = 0.3 if filtered else 0.1
+                    confident_docs = [
+                        doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
+                    ]
+                    if not confident_docs:
+                        confident_docs = [documents[0]]
+
+                chosen_model = local_model if use_local else model
+                prompt_tokens = count_tokens(prompt, model=chosen_model)
+                context_budget = token_budget - prompt_tokens - 300
+                current = 0
+                context_chunks = []
+                for doc in confident_docs:
+                    t = count_tokens(doc, model=chosen_model)
+                    if current + t > context_budget:
+                        break
+                    context_chunks.append(doc)
+                    current += t
+
+                context = "\n".join(context_chunks)
+                full_prompt = (
+                    f"{prompt}\n\nThe primary subject in question is \"{normalized_base_name}\".\n\n"
+                    f"Secondary subjects could include \"{joined_names}\"\n\n"
+                    f"Lore context follows until the end of this message:\n{context}\n\n"
+                )
+
+                if use_local:
+                    tags = ask_local_model(full_prompt, local_model)
+                    token_count = prompt_tokens + count_tokens(tags, model=chosen_model)
+                else:
+                    tags, token_count = ask_openai(full_prompt, model=model)
+
+                if tags.strip().lower() == "unknown":
+                    print(f"[Fallback] Generation failed for {path.name}. Using Chroma document snippets.")
+                    logging.warning(f"Fallback to Chroma for {path.name}")
+                    tag_result = [doc[:50] for doc in documents[:5]]
+                    writer.writerow([path.name, ", ".join(tag_result)])
+                    processed.add(path.name)
+                    continue
+
+                tag_result = parse_tags(tags)
+                writer.writerow([path.name, ", ".join(tag_result)])
+                processed.add(path.name)
+                if use_local:
+                    print(f"Tagged {path.name} [local] using ~{token_count} tokens")
+                    logging.info(f"Tagged {path.name} | Tokens: {token_count} | local mode")
+                else:
+                    cost_estimate = token_count / 1000 * 0.01
+                    print(f"Tagged {path.name} using ~{token_count} tokens (${cost_estimate:.4f})")
+                    logging.info(
+                        f"Tagged {path.name} | Tokens: {token_count} | Cost: ${cost_estimate:.4f}"
+                    )
+            except Exception as e:
+                print(f"Error processing {path.name}: {e}")
+                logging.error(f"Tagging failed for {path.name}: {e}")
+                writer.writerow([path.name, ""])
+                processed.add(path.name)
+            finally:
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
