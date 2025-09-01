@@ -1,5 +1,7 @@
 # 🧠 Warhammer & D&D Miniature Tagger
 
+[![Tests](https://github.com/OWNER/ModelTagger/actions/workflows/tests.yml/badge.svg)](https://github.com/OWNER/ModelTagger/actions/workflows/tests.yml)
+
 This project uses a Retrieval-Augmented Generation (RAG) pipeline to:
 1. Scrape lore from Fandom / Lexicanum
 2. Embed it in a vector database (Chroma)
@@ -68,6 +70,33 @@ python src/backfill_slugs.py --vector-db-path .chroma/warhammer --collection lor
 ```bash
 python src/main.py --step tag --zips data/zips --output outputs/tags.csv --vector-db-path .chroma/warhammer --mode warhammer
 ```
+
+### 🏠 Local Mode (Ollama + bge-m3)
+
+Prerequisites:
+
+```bash
+pip install sentence-transformers torch
+# optional reranker
+pip install transformers
+
+# run local LLM (the script will pull the model if missing)
+brew install ollama || curl -fsSL https://ollama.com/install.sh | sh
+ollama serve
+```
+
+Embedding and tagging with local models:
+
+```bash
+python src/main.py --step embed --output outputs/lore.json --vector-db-path .chroma/local \
+    --use-local --embed-model BAAI/bge-m3
+
+python src/main.py --step tag --zips data/zips --output outputs/tags.csv \
+    --use-local --local-model llama3.1:8b-instruct --rerank \
+    --rerank-model BAAI/bge-reranker-base --token-budget 3000
+```
+
+The tagging step will automatically pull `--local-model` from Ollama if it's not already installed.
 
 ### 4. Upload to Manyfold
 
