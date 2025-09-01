@@ -37,6 +37,32 @@ python src/main.py --step scrape --seeds seeds/warhammer_seeds.txt --output outp
 python src/main.py --step embed --output outputs/lore.json --vector-db-path .chroma/warhammer
 ```
 
+> **Updating old embeddings:** If you embedded lore before the `slug` field was
+> introduced, you can add slugs to existing records without re-running the
+> entire embedding step. Iterate over your Chroma collection, derive a slug from
+> each `source` URL, and update the metadata in place:
+
+```python
+from urllib.parse import urlparse
+from chromadb import PersistentClient
+from utils import slugify
+
+client = PersistentClient(path=".chroma/warhammer")
+col = client.get_collection("lore")
+items = col.get(include=["metadatas"])
+
+for item_id, meta in zip(items["ids"], items["metadatas"]):
+    url = meta["source"]
+    slug = slugify(urlparse(url).path.rstrip("/").split("/")[-1])
+    col.update(ids=[item_id], metadatas=[{**meta, "slug": slug}])
+```
+
+Or run the provided utility to backfill slugs automatically:
+
+```bash
+python src/backfill_slugs.py --vector-db-path .chroma/warhammer --collection lore
+```
+
 ### 3. Tag Miniature Files
 
 ```bash
