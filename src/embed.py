@@ -88,8 +88,8 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
     with open(input_path) as f:
         documents = json.load(f)
 
-    with tqdm(total=len(documents), desc="Processing Documents") as doc_pbar:
-        pbar = tqdm(total=0, desc="Embedding", unit="chunk")
+    with tqdm(total=len(documents), desc="Processing Documents") as doc_pbar, \
+         tqdm(total=0, desc="Embedding", unit="chunk") as chunk_pbar:
         for doc in documents:
             text = doc["text"]
             url = doc["url"]
@@ -97,8 +97,8 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
                 doc_pbar.update(1)
                 continue
             chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
-            pbar.total += len(chunks)
-            pbar.refresh()
+            chunk_pbar.total += len(chunks)
+            chunk_pbar.refresh()
             for idx, chunk in enumerate(chunks):
                 chunk_id = f"{url}#chunk{idx}"
                 collection.add(
@@ -106,7 +106,6 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
                     metadatas=[{"source": url, "chunk": idx}],
                     ids=[chunk_id],
                 )
-                pbar.update(1)
+                chunk_pbar.update(1)
             doc_pbar.update(1)
-        pbar.close()
 
