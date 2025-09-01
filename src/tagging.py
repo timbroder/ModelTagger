@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import time
 import logging
 import re
+from utils import slugify
 
 logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
@@ -141,12 +142,15 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
                     seen.add(word)
             normalized_base_name = " ".join(deduped_words)
 
+            slugified_term = slugify(normalized_base_name)
+
             # Retrieve candidate chunks from the vector DB that mention the base name.
             # Fall back to the unfiltered query if none are found.
             results = collection.query(
                 query_texts=[joined_names],
                 n_results=50,
                 where_document={"$contains": normalized_base_name},
+                where={"slug": {"$eq": slugified_term}},
             )
             documents = results["documents"][0]
             distances = results["distances"][0]
