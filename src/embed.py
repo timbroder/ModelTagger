@@ -81,12 +81,21 @@ def semantic_chunk_text(
     return chunks
 
 
-def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
+def run_embedding(input_path, vector_db_path, use_local: bool = False, embed_model: str = "BAAI/bge-m3", model: str = "gpt-5"):
     client = chromadb.PersistentClient(path=vector_db_path)
-    collection = client.get_or_create_collection(
-        name="lore",
-        metadata={"hnsw:space": "cosine"},
-    )
+    if use_local:
+        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+        ef = SentenceTransformerEmbeddingFunction(model_name=embed_model)
+        collection = client.get_or_create_collection(
+            name="lore",
+            embedding_function=ef,
+            metadata={"hnsw:space": "cosine"},
+        )
+    else:
+        collection = client.get_or_create_collection(
+            name="lore",
+            metadata={"hnsw:space": "cosine"},
+        )
 
     with open(input_path) as f:
         documents = json.load(f)

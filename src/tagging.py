@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import time
 import logging
 import re
+import requests
 from utils import slugify
 
 logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
@@ -58,19 +59,46 @@ def clean_file_name(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip()
 
 def get_tokenizer(model):
-    # GPT-4.1 and friends use cl100k_base; update as needed for other future models
+    import tiktoken
     if model in ("gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4", "gpt-3.5-turbo"):
-        try:
-            return tiktoken.encoding_for_model(model)
-        except KeyError:
-            return tiktoken.get_encoding("cl100k_base")
-    else:
+        return tiktoken.get_encoding("cl100k_base")
+    try:
         return tiktoken.encoding_for_model(model)
+    except KeyError:
+        return tiktoken.get_encoding("cl100k_base")
 
 
 def count_tokens(text, model="gpt-4.1"):
     enc = get_tokenizer(model)
     return len(enc.encode(text))
+
+
+def ensure_local_model(model: str):
+    try:
+        resp = requests.get("http://localhost:11434/api/tags", timeout=5)
+        resp.raise_for_status()
+        models = [m.get("model") or m.get("name") for m in resp.json().get("models", [])]
+        if model not in models:
+            pull = requests.post("http://localhost:11434/api/pull", json={"name": model}, timeout=60)
+            pull.raise_for_status()
+    except Exception as e:
+        print(f"[Ollama Pull Warning] {e}")
+
+
+def ask_local_model(prompt: str, model: str) -> str:
+    try:
+        ensure_local_model(model)
+        resp = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model, "prompt": prompt, "temperature": 0.2, "stream": False},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", "unknown")
+    except Exception as e:
+        print(f"[Local Model Error] {e}")
+        return "unknown"
 
 def ask_openai(prompt, model="gpt-4.1", retries=3):
     enc = get_tokenizer(model)
@@ -96,7 +124,19 @@ def ask_openai(prompt, model="gpt-4.1", retries=3):
             time.sleep(2 ** attempt)
 
 
-def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
+def run_tagging(
+    zips_dir,
+    output_csv,
+    vector_db_path,
+    prompt_override,
+    mode,
+    use_local: bool = False,
+    local_model: str = "llama3.1:8b-instruct",
+    model: str = "gpt-4o",
+    token_budget: int = 3000,
+    rerank: bool = False,
+    rerank_model: str = "BAAI/bge-reranker-base",
+):
     with open("config/tagging_presets.json") as f:
         presets = json.load(f)[mode]
 
@@ -154,7 +194,6 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
             )
             documents = results["documents"][0]
             distances = results["distances"][0]
-            filtered = bool(documents)
             if not documents:
                 results = collection.query(
                     query_texts=[joined_names],
@@ -163,36 +202,63 @@ def run_tagging(zips_dir, output_csv, vector_db_path, prompt_override, mode):
                 documents = results["documents"][0]
                 distances = results["distances"][0]
 
-            # Adjust confidence depending on whether the base-name filter hit.
-            confidence_threshold = 0.2 if filtered else 0.1
-            confident_docs = [
-                doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
-            ]
+            if rerank:
+                from sentence_transformers import CrossEncoder
+                ce = CrossEncoder(rerank_model)
+                scores = ce.predict([(joined_names, d) for d in documents])
+                ranked = [d for d, _ in sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)]
+                confident_docs = ranked[:8]
+            else:
+                filtered = bool(documents)
+                confidence_threshold = 0.2 if filtered else 0.1
+                confident_docs = [
+                    doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
+                ]
+                if not confident_docs:
+                    confident_docs = [documents[0]]
 
-            if not confident_docs:
-                confident_docs = [documents[0]]
-
+            chosen_model = local_model if use_local else model
+            prompt_tokens = count_tokens(prompt, model=chosen_model)
+            context_budget = token_budget - prompt_tokens - 300
+            current = 0
             context_chunks = []
-            token_budget = 3000
             for doc in confident_docs:
-                if count_tokens("\n".join(context_chunks + [doc])) > token_budget:
+                t = count_tokens(doc, model=chosen_model)
+                if current + t > context_budget:
                     break
                 context_chunks.append(doc)
+                current += t
 
             context = "\n".join(context_chunks)
-            full_prompt = f"{prompt}\n\nThe primary subject in question is \"{normalized_base_name}\".\n\nSecondary subjects could include \"{joined_names}\"\n\n Lore context follows until the end of this message:\n{context}\n\n"
-            tags, token_count = ask_openai(full_prompt)
+            full_prompt = (
+                f"{prompt}\n\nThe primary subject in question is \"{normalized_base_name}\".\n\n"
+                f"Secondary subjects could include \"{joined_names}\"\n\n"
+                f"Lore context follows until the end of this message:\n{context}\n\n"
+            )
+
+            if use_local:
+                tags = ask_local_model(full_prompt, local_model)
+                token_count = prompt_tokens + count_tokens(tags, model=chosen_model)
+            else:
+                tags, token_count = ask_openai(full_prompt, model=model)
 
             if tags.strip().lower() == "unknown":
-                print(f"[Fallback] OpenAI failed for {path.name}. Using Chroma document snippets.")
+                print(f"[Fallback] Generation failed for {path.name}. Using Chroma document snippets.")
                 logging.warning(f"Fallback to Chroma for {path.name}")
-                tag_result = [doc[:50] for doc in documents]
+                tag_result = [doc[:50] for doc in documents[:5]]
                 writer.writerow([path.name, "; ".join(tag_result)])
                 shutil.rmtree(temp_dir)
                 continue
 
             tag_result = tags.strip().split(",") if "," in tags else tags.strip().split("\n")
             writer.writerow([path.name, "; ".join(tag_result)])
-            print(f"Tagged {path.name} using ~{token_count} tokens")
-            logging.info(f"Tagged {path.name} | Tokens: {token_count}")
+            if use_local:
+                print(f"Tagged {path.name} [local] using ~{token_count} tokens")
+                logging.info(f"Tagged {path.name} | Tokens: {token_count} | local mode")
+            else:
+                cost_estimate = token_count / 1000 * 0.01
+                print(f"Tagged {path.name} using ~{token_count} tokens (${cost_estimate:.4f})")
+                logging.info(
+                    f"Tagged {path.name} | Tokens: {token_count} | Cost: ${cost_estimate:.4f}"
+                )
             shutil.rmtree(temp_dir)

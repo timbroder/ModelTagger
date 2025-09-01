@@ -6,3 +6,6 @@ tiktoken
 chromadb
 patool
 tqdm
+sentence-transformers
+transformers
+torch
