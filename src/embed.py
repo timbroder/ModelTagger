@@ -111,7 +111,7 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
                 chunk_id = f"{url}#chunk{idx}"
                 collection.add(
                     documents=[chunk],
-                    metadatas=[{"source": url, "slug": slug}],
+                    metadatas=[{"source": url, "slug": slug, "chunk": idx}],
                     ids=[chunk_id],
                 )
                 pbar.update(1)
