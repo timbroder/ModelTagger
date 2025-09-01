@@ -99,19 +99,28 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
             url = doc["url"]
             if not text.strip():
                 continue
-            chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
+
+            title = doc.get("title")
+            if not title:
+                # Fallback: derive a readable title from the URL path
+                title = urlparse(url).path.rstrip("/").split("/")[-1]
+                title = title.replace("_", " ").replace("-", " ")
+
+            raw_chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
+            chunks = [f"{title} - {chunk}" if title else chunk for chunk in raw_chunks]
+
             slug = slugify(urlparse(url).path.rstrip("/").split("/")[-1])
-            prepared.append((url, slug, chunks))
+            prepared.append((url, slug, title, chunks))
             total_chunks += len(chunks)
             pbar.update(1)
 
     with tqdm(total=total_chunks, desc="Embedding") as pbar:
-        for url, slug, chunks in prepared:
+        for url, slug, title, chunks in prepared:
             for idx, chunk in enumerate(chunks):
                 chunk_id = f"{url}#chunk{idx}"
                 collection.add(
                     documents=[chunk],
-                    metadatas=[{"source": url, "slug": slug, "chunk": idx}],
+                    metadatas=[{"source": url, "slug": slug, "chunk": idx, "title": title}],
                     ids=[chunk_id],
                 )
                 pbar.update(1)
