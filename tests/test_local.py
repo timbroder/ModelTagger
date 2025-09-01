@@ -5,6 +5,47 @@ import sys
 sys.path.append('src')
 
 
+def test_parse_tags_examples(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    from tagging import parse_tags
+
+    cases = [
+        (
+            "1. Adepta Sororitas; 2. Sisters of Battle; 3. Sister Superior; 4. Sergeant; 5. Seraphim; 6. Veteran Sister Superior; 7. Novitiate Superior; 8. Power Armour; 9. Chainsword; 10. Boltgun",
+            [
+                "Adepta Sororitas",
+                "Sisters of Battle",
+                "Sister Superior",
+                "Sergeant",
+                "Seraphim",
+                "Veteran Sister Superior",
+                "Novitiate Superior",
+                "Power Armour",
+                "Chainsword",
+                "Boltgun",
+            ],
+        ),
+        (
+            "Here are some suggested tags for the \"Wolfspear Techmarine\":; ; 1. Wolfspear; 2. Space Marines; 3. Adeptus Astartes; 4. Techmarine; 5. Adeptus Mechanicus; 6. Primaris; 7. Support; 8. Servo-Arm; 9. Mechadendrite; 10. Armoury Custodian",
+            [
+                "Wolfspear",
+                "Space Marines",
+                "Adeptus Astartes",
+                "Techmarine",
+                "Adeptus Mechanicus",
+                "Primaris",
+                "Support",
+                "Servo-Arm",
+                "Mechadendrite",
+                "Armoury Custodian",
+            ],
+        ),
+    ]
+
+    for raw, expected in cases:
+        assert parse_tags(raw) == expected
+
+
 def test_local_embeddings(tmp_path):
     data = [{"url": "http://example.com/a", "text": "lore"}]
     lore_path = tmp_path / "lore.json"
@@ -69,7 +110,7 @@ def test_local_generation(tmp_path, monkeypatch):
     assert urls[1].endswith("/api/generate")
 
     rows = list(csv.reader(open(out_csv)))
-    assert rows[1][1].replace(" ", "") == "tag1;tag2"
+    assert rows[1][1].replace(" ", "") == "tag1,tag2"
 
 
 def test_rerank(tmp_path, monkeypatch):

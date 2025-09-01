@@ -124,6 +124,27 @@ def ask_openai(prompt, model="gpt-4.1", retries=3):
             time.sleep(2 ** attempt)
 
 
+def parse_tags(raw: str) -> list:
+    """Extract a clean list of tags from an LLM response."""
+    # Try to capture enumerated or bulleted list items first
+    items = re.findall(r"\d+\.\s*([^;\n]+)", raw)
+    if not items:
+        items = re.findall(r"[-*]\s*([^;\n]+)", raw)
+    if not items:
+        items = re.split(r"[\n;,]+", raw)
+
+    cleaned = []
+    for item in items:
+        item = re.sub(r"^\s*\d+\.?\s*", "", item)
+        item = item.strip(" \"'")
+        if not item:
+            continue
+        if re.search(r"suggested tags|tags reflect|based on", item, re.IGNORECASE):
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
 def run_tagging(
     zips_dir,
     output_csv,
@@ -274,12 +295,12 @@ def run_tagging(
                 print(f"[Fallback] Generation failed for {path.name}. Using Chroma document snippets.")
                 logging.warning(f"Fallback to Chroma for {path.name}")
                 tag_result = [doc[:50] for doc in documents[:5]]
-                writer.writerow([path.name, "; ".join(tag_result)])
+                writer.writerow([path.name, ", ".join(tag_result)])
                 shutil.rmtree(temp_dir)
                 continue
 
-            tag_result = tags.strip().split(",") if "," in tags else tags.strip().split("\n")
-            writer.writerow([path.name, "; ".join(tag_result)])
+            tag_result = parse_tags(tags)
+            writer.writerow([path.name, ", ".join(tag_result)])
             if use_local:
                 print(f"Tagged {path.name} [local] using ~{token_count} tokens")
                 logging.info(f"Tagged {path.name} | Tokens: {token_count} | local mode")
