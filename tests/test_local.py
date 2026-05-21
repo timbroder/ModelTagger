@@ -153,7 +153,7 @@ def test_rerank(tmp_path, monkeypatch):
     assert prompt.find("doc2") < prompt.find("doc1")
 
 
-def test_tagging_appends(tmp_path, monkeypatch):
+def test_tagging_skips_logged_files(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     zips = tmp_path / "zips"
     zips.mkdir()
@@ -194,4 +194,26 @@ def test_tagging_appends(tmp_path, monkeypatch):
         run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
 
     rows = list(csv.reader(open(out_csv)))
-    assert len(rows) == 3
+    assert len(rows) == 2
+
+
+def test_logs_failed_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "bad.stl").write_text("mesh")
+    out_csv = tmp_path / "tags.csv"
+    vector_path = tmp_path / "db"
+
+    mock_col = MagicMock()
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.extract_to_temp", return_value=None):
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
+
+    rows = list(csv.reader(open(out_csv)))
+    assert rows[1][0] == "bad.stl"
+    assert rows[1][1] == ""

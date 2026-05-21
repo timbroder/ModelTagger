@@ -186,6 +186,7 @@ def run_tagging(
         from sentence_transformers import CrossEncoder
         cross_encoder = CrossEncoder(rerank_model)
 
+
     file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
     processed = set()
     if file_exists:
