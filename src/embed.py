@@ -101,12 +101,12 @@ def run_embedding(input_path: str, vector_db_path: str, use_local: bool = False,
         documents = json.load(f)
 
     prepared = []
-    total_chunks = 0
-    with tqdm(total=len(documents), desc="Pre Embedding") as pbar:
+    with tqdm(total=len(documents), desc="Processing Documents") as doc_pbar:
         for doc in documents:
             text = doc["text"]
             url = doc["url"]
             if not text.strip():
+                doc_pbar.update(1)
                 continue
 
             title = doc.get("title")
@@ -117,11 +117,9 @@ def run_embedding(input_path: str, vector_db_path: str, use_local: bool = False,
 
             raw_chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
             chunks = [f"{title} - {chunk}" if title else chunk for chunk in raw_chunks]
-
             slug = slugify(urlparse(url).path.rstrip("/").split("/")[-1])
             prepared.append((url, slug, title, chunks))
-            total_chunks += len(chunks)
-            pbar.update(1)
+            doc_pbar.update(1)
 
     # Flatten all chunks into batches for efficient embedding
     all_docs = []
