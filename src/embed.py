@@ -13,8 +13,8 @@ def semantic_chunk_text(
     min_tokens: int = 300,
     max_tokens: int = 800,
     overlap_ratio: float = 0.2,
-    model: str = "gpt-5",
-):
+    model: str = "gpt-4o",
+) -> list[str]:
     """Split ``text`` into semantically meaningful chunks.
 
     The chunker produces segments between ``min_tokens`` and ``max_tokens`` using
@@ -81,7 +81,7 @@ def semantic_chunk_text(
     return chunks
 
 
-def run_embedding(input_path, vector_db_path, use_local: bool = False, embed_model: str = "BAAI/bge-m3", model: str = "gpt-5"):
+def run_embedding(input_path: str, vector_db_path: str, use_local: bool = False, embed_model: str = "BAAI/bge-m3", model: str = "gpt-4o") -> None:
     client = chromadb.PersistentClient(path=vector_db_path)
     if use_local:
         from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
@@ -123,14 +123,22 @@ def run_embedding(input_path, vector_db_path, use_local: bool = False, embed_mod
             total_chunks += len(chunks)
             pbar.update(1)
 
-    with tqdm(total=total_chunks, desc="Embedding") as pbar:
-        for url, slug, title, chunks in prepared:
-            for idx, chunk in enumerate(chunks):
-                chunk_id = f"{url}#chunk{idx}"
-                collection.add(
-                    documents=[chunk],
-                    metadatas=[{"source": url, "slug": slug, "chunk": idx, "title": title}],
-                    ids=[chunk_id],
-                )
-                pbar.update(1)
+    # Flatten all chunks into batches for efficient embedding
+    all_docs = []
+    all_metas = []
+    all_ids = []
+    for url, slug, title, chunks in prepared:
+        for idx, chunk in enumerate(chunks):
+            all_docs.append(chunk)
+            all_metas.append({"source": url, "slug": slug, "chunk": idx, "title": title})
+            all_ids.append(f"{url}#chunk{idx}")
+
+    batch_size = 100
+    with tqdm(total=len(all_docs), desc="Embedding") as pbar:
+        for i in range(0, len(all_docs), batch_size):
+            batch_docs = all_docs[i:i + batch_size]
+            batch_metas = all_metas[i:i + batch_size]
+            batch_ids = all_ids[i:i + batch_size]
+            collection.add(documents=batch_docs, metadatas=batch_metas, ids=batch_ids)
+            pbar.update(len(batch_docs))
 
