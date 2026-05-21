@@ -8,7 +8,6 @@ from chromadb import PersistentClient
 from openai import OpenAI
 import tiktoken  # Optional token estimation
 import csv
-from urllib.parse import urlparse
 import time
 import logging
 import re
@@ -17,10 +16,19 @@ from utils import slugify
 
 logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
-# Initialize the OpenAI client using environment variables for configuration
-client = OpenAI()
+# Lazy-initialized OpenAI client
+_openai_client = None
 
-def extract_to_temp(file_path):
+
+def get_openai_client():
+    """Get or create the OpenAI client (lazy initialization)."""
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI()
+    return _openai_client
+
+def extract_to_temp(file_path: Path) -> Path | None:
+    """Extract archive contents to a temporary directory."""
     temp_dir = Path(tempfile.mkdtemp())
     ext = file_path.suffix.lower()
 
@@ -37,7 +45,8 @@ def extract_to_temp(file_path):
 
     return temp_dir
 
-def is_valid_archive_content(folder):
+def is_valid_archive_content(folder: Path) -> bool:
+    """Check if folder contains valid 3D model files and no dangerous executables."""
     allowed_exts = {".stl", ".obj", ".png"}
     bad_exts = {".exe", ".bat", ".js", ".dll"}
     files = list(folder.rglob("*"))
@@ -58,7 +67,8 @@ def clean_file_name(name: str) -> str:
     name = re.sub(r"[^0-9a-zA-Z]+", " ", name)  # Replace symbols with spaces
     return re.sub(r"\s+", " ", name).strip()
 
-def get_tokenizer(model):
+def get_tokenizer(model: str):
+    """Get the appropriate tiktoken encoder for the given model."""
     import tiktoken
     if model in ("gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4", "gpt-3.5-turbo"):
         return tiktoken.get_encoding("cl100k_base")
@@ -68,12 +78,14 @@ def get_tokenizer(model):
         return tiktoken.get_encoding("cl100k_base")
 
 
-def count_tokens(text, model="gpt-4.1"):
+def count_tokens(text: str, model: str = "gpt-4.1") -> int:
+    """Count the number of tokens in text for the given model."""
     enc = get_tokenizer(model)
     return len(enc.encode(text))
 
 
-def ensure_local_model(model: str):
+def ensure_local_model(model: str) -> None:
+    """Ensure the specified Ollama model is available, pulling if necessary."""
     try:
         resp = requests.get("http://localhost:11434/api/tags", timeout=5)
         resp.raise_for_status()
@@ -100,12 +112,13 @@ def ask_local_model(prompt: str, model: str) -> str:
         print(f"[Local Model Error] {e}")
         return "unknown"
 
-def ask_openai(prompt, model="gpt-4.1", retries=3):
+def ask_openai(prompt: str, model: str = "gpt-4.1", retries: int = 3) -> tuple[str, int]:
+    """Send a prompt to OpenAI and return (response_text, total_tokens)."""
     enc = get_tokenizer(model)
     prompt_tokens = len(enc.encode(prompt))
     for attempt in range(retries):
         try:
-            response = client.chat.completions.create(
+            response = get_openai_client().chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a miniature tagging assistant."},
@@ -146,26 +159,34 @@ def parse_tags(raw: str) -> list:
 
 
 def run_tagging(
-    zips_dir,
-    output_csv,
-    vector_db_path,
-    prompt_override,
-    mode,
+    zips_dir: str,
+    output_csv: str,
+    vector_db_path: str | None,
+    prompt_override: str | None,
+    mode: str,
     use_local: bool = False,
     local_model: str = "llama3.1:8b-instruct",
     model: str = "gpt-4o",
     token_budget: int = 3000,
     rerank: bool = False,
     rerank_model: str = "BAAI/bge-reranker-base",
-):
+) -> None:
+    """Tag 3D model files using RAG with lore from the vector database."""
     with open("config/tagging_presets.json") as f:
         presets = json.load(f)[mode]
 
     vector_db_path = vector_db_path or presets["vector_db"]
     prompt = prompt_override or presets["prompt"]
 
-    client = PersistentClient(path=vector_db_path)
-    collection = client.get_or_create_collection(name="lore")
+    chroma_client = PersistentClient(path=vector_db_path)
+    collection = chroma_client.get_or_create_collection(name="lore")
+
+    cross_encoder = None
+    if rerank:
+        from sentence_transformers import CrossEncoder
+        cross_encoder = CrossEncoder(rerank_model)
+
+
     file_exists = os.path.exists(output_csv) and os.path.getsize(output_csv) > 0
     processed = set()
     if file_exists:
@@ -261,14 +282,12 @@ def run_tagging(
                     superset[distances[0]] = results
 
                 min_results = superset[min(superset.keys())]
-                documents = results["documents"][0]
-                distances = results["distances"][0]
+                documents = min_results["documents"][0]
+                distances = min_results["distances"][0]
 
                 # Choose the best result set based on the closest distance
                 if rerank:
-                    from sentence_transformers import CrossEncoder
-                    ce = CrossEncoder(rerank_model)
-                    scores = ce.predict([(joined_names, d) for d in documents])
+                    scores = cross_encoder.predict([(joined_names, d) for d in documents])
                     ranked = [d for d, _ in sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)]
                     confident_docs = ranked[:8]
                 else:

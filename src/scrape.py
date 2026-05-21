@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 
-def scrape_url(args):
+def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
     """Helper function to scrape a single URL."""
     url, depth, domain, max_depth, webpage_extensions, image_extensions, visited, results = args
     if url in visited or depth > max_depth:
@@ -44,7 +44,7 @@ def scrape_url(args):
     return new_links
 
 
-def save_progress(output_path, results):
+def save_progress(output_path: str, results: list[dict]) -> None:
     """Append new results to the output file."""
     try:
         # If the file exists, read its current content and append new results
@@ -64,8 +64,8 @@ def save_progress(output_path, results):
         print(f"Error saving progress: {e}")
 
 
-def load_progress(output_path):
-    """Helper function to load progress from output file."""
+def load_progress(output_path: str) -> tuple[list[dict], set[str]]:
+    """Load progress from output file, returning (results, visited_urls)."""
     if os.path.exists(output_path):
         try:
             with open(output_path, 'r') as f:
@@ -78,7 +78,8 @@ def load_progress(output_path):
     return [], set()
 
 
-def run_scraping(seed_file, output_path, max_pages=100, max_depth=2, max_threads=5, save_interval=10):
+def run_scraping(seed_file: str, output_path: str, max_pages: int = 100, max_depth: int = 2, max_threads: int = 5, save_interval: int = 10) -> None:
+    """Scrape lore pages from wiki seeds and save to output file."""
     with open(seed_file) as f:
         seeds = [line.strip() for line in f if line.strip()]
 
@@ -95,21 +96,7 @@ def run_scraping(seed_file, output_path, max_pages=100, max_depth=2, max_threads
     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.webp'}
 
     if not queue and len(visited) < max_pages:
-        print("All seed URLs have already been visited. Attempting to find new links dynamically.")
-        for entry in results:
-            # Add links from results into the queue that have not been visited
-            soup = BeautifulSoup(entry['text'], 'html.parser')
-            for a in soup.find_all('a', href=True):
-                link = urljoin(entry['url'], a['href'])
-                parsed = urlparse(link)
-                ext = parsed.path.lower().split('.')[-1] if '.' in parsed.path else ''
-                ext = f'.{ext}' if ext else ''
-
-                if (parsed.netloc == domain
-                        and parsed.path.startswith('/wiki')
-                        and link not in visited
-                        and ext not in image_extensions):
-                    queue.append((link, 0))  # Reset depth for new links
+        print("All seed URLs have already been visited. Add more seeds to continue scraping.")
 
     with ThreadPoolExecutor(max_threads) as executor, tqdm(
             total=len(seeds), initial=len(visited), desc="Scraping"

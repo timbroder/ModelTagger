@@ -1,14 +1,28 @@
 /.venv/
 .idea
 src/__pycache__
+__pycache__/
 .DS_Store
 tools/all_pages.txt
 warhammer_db
 warhammer_db copy
 warhammer_db1
+warhammer_db1 copy
 files
 seeds
 lore
 *.log
 *.csv
 tools/unique_urls.txt
+
+# Generated data
+.chroma/
+outputs/
+
+# Test/scratch files
+warhammer_lore.json
+warhammer_lore copy.json
+warhammer_lore copy 2.json
+warhammer_lore copy diybke.json
+sample.xlsx
+src/vid.py
