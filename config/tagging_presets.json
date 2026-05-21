@@ -2,11 +2,11 @@
   "warhammer": {
     "vector_db": ".chroma/warhammer",
     "seeds": "seeds/warhammer_seeds.txt",
-    "prompt": "Given the name and files of a Warhammer 40K miniature, suggest 5-10 concise tags that identify its faction, subfaction or chapter, unit type, battlefield role, and any notable equipment, powers, or traits. Tags should be accurate and lore-aligned."
+    "prompt": "Given the name and files of a Warhammer 40K miniature, suggest 5-10 concise tags that identify its faction, subfaction or chapter, unit type, battlefield role, and any notable equipment, powers, or traits. Tags should be accurate and lore-aligned. Return only the tags as a comma-separated list with no numbering or extra text."
   },
   "dnd": {
     "vector_db": ".chroma/dnd",
     "seeds": "seeds/dnd_seeds.txt",
-    "prompt": "Suggest five concise tags for this Dungeons & Dragons miniature."
+    "prompt": "Suggest five concise tags for this Dungeons & Dragons miniature. Return only the tags as a comma-separated list with no numbering or extra text."
   }
 }

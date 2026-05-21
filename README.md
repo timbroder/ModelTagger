@@ -1,5 +1,7 @@
 # 🧠 Warhammer & D&D Miniature Tagger
 
+[![Tests](https://github.com/OWNER/ModelTagger/actions/workflows/tests.yml/badge.svg)](https://github.com/OWNER/ModelTagger/actions/workflows/tests.yml)
+
 This project uses a Retrieval-Augmented Generation (RAG) pipeline to:
 1. Scrape lore from Fandom / Lexicanum
 2. Embed it in a vector database (Chroma)
@@ -37,11 +39,68 @@ python src/main.py --step scrape --seeds seeds/warhammer_seeds.txt --output outp
 python src/main.py --step embed --output outputs/lore.json --vector-db-path .chroma/warhammer
 ```
 
+> **Updating old embeddings:** If you embedded lore before the `slug` field was
+> introduced, you can add slugs to existing records without re-running the
+> entire embedding step. Iterate over your Chroma collection, derive a slug from
+> each `source` URL, and update the metadata in place:
+
+```python
+from urllib.parse import urlparse
+from chromadb import PersistentClient
+from utils import slugify
+
+client = PersistentClient(path=".chroma/warhammer")
+col = client.get_collection("lore")
+items = col.get(include=["metadatas"])
+
+for item_id, meta in zip(items["ids"], items["metadatas"]):
+    url = meta["source"]
+    slug = slugify(urlparse(url).path.rstrip("/").split("/")[-1])
+    col.update(ids=[item_id], metadatas=[{**meta, "slug": slug}])
+```
+
+Or run the provided utility to backfill slugs automatically:
+
+```bash
+python src/backfill_slugs.py --vector-db-path .chroma/warhammer --collection lore
+```
+
 ### 3. Tag Miniature Files
 
 ```bash
 python src/main.py --step tag --zips data/zips --output outputs/tags.csv --vector-db-path .chroma/warhammer --mode warhammer
 ```
+
+### 🏠 Local Mode (Ollama + bge-m3)
+
+Prerequisites:
+
+```bash
+pip install sentence-transformers torch
+# optional reranker
+pip install transformers
+
+# run local LLM (the script will pull the model if missing)
+# macOS (via Homebrew)
+brew install ollama
+# Linux
+curl -fsSL https://ollama.com/install.sh | sh
+# start the Ollama service
+ollama serve
+```
+
+Embedding and tagging with local models:
+
+```bash
+python src/main.py --step embed --output outputs/lore.json --vector-db-path .chroma/local \
+    --use-local --embed-model BAAI/bge-m3
+
+python src/main.py --step tag --zips data/zips --output outputs/tags.csv \
+    --use-local --local-model llama3.1:8b-instruct --rerank \
+    --rerank-model BAAI/bge-reranker-base --token-budget 3000
+```
+
+The tagging step will automatically pull `--local-model` from Ollama if it's not already installed.
 
 ### 4. Upload to Manyfold
 

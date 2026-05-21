@@ -3,7 +3,10 @@ import chromadb
 import tiktoken
 import spacy
 import re
+from urllib.parse import urlparse
 from tqdm import tqdm
+
+from utils import slugify
 
 def semantic_chunk_text(
     text: str,
@@ -78,12 +81,21 @@ def semantic_chunk_text(
     return chunks
 
 
-def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
+def run_embedding(input_path, vector_db_path, use_local: bool = False, embed_model: str = "BAAI/bge-m3", model: str = "gpt-5"):
     client = chromadb.PersistentClient(path=vector_db_path)
-    collection = client.get_or_create_collection(
-        name="lore",
-        metadata={"hnsw:space": "cosine"},
-    )
+    if use_local:
+        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+        ef = SentenceTransformerEmbeddingFunction(model_name=embed_model)
+        collection = client.get_or_create_collection(
+            name="lore",
+            embedding_function=ef,
+            metadata={"hnsw:space": "cosine"},
+        )
+    else:
+        collection = client.get_or_create_collection(
+            name="lore",
+            metadata={"hnsw:space": "cosine"},
+        )
 
     with open(input_path) as f:
         documents = json.load(f)
@@ -96,14 +108,23 @@ def run_embedding(input_path, vector_db_path, model: str = "gpt-5"):
             if not text.strip():
                 doc_pbar.update(1)
                 continue
-            chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
+
+            title = doc.get("title")
+            if not title:
+                # Fallback: derive a readable title from the URL path
+                title = urlparse(url).path.rstrip("/").split("/")[-1]
+                title = title.replace("_", " ").replace("-", " ")
+
+            raw_chunks = semantic_chunk_text(text, min_tokens=300, max_tokens=800, model=model)
+            chunks = [f"{title} - {chunk}" if title else chunk for chunk in raw_chunks]
+            slug = slugify(urlparse(url).path.rstrip("/").split("/")[-1])
             chunk_pbar.total += len(chunks)
             chunk_pbar.refresh()
             for idx, chunk in enumerate(chunks):
                 chunk_id = f"{url}#chunk{idx}"
                 collection.add(
                     documents=[chunk],
-                    metadatas=[{"source": url, "chunk": idx}],
+                    metadatas=[{"source": url, "slug": slug, "chunk": idx, "title": title}],
                     ids=[chunk_id],
                 )
                 chunk_pbar.update(1)
