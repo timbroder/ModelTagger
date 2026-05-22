@@ -177,6 +177,14 @@ def _html_to_markdown(html: str) -> str:
         class_=lambda c: c and bool(set(c) & _STRIP_CLASSES),
     ):
         unwanted.decompose()
+    # Remove images and their enclosing <a> wrappers to keep text clean
+    for img in soup.find_all("img"):
+        parent = img.parent
+        img.decompose()
+        if parent and parent.name == "a" and not parent.get_text(strip=True):
+            parent.decompose()
+    for figure in soup.find_all("figure"):
+        figure.decompose()
     return md_convert(str(soup), heading_style="ATX", bullets="-")
 
 
@@ -205,7 +213,7 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
         categories = [
             c["*"].replace("_", " ")
             for c in parsed.get("categories", [])
-            if not c.get("hidden")
+            if not c.get("hidden") and len(c["*"]) > 1
         ]
         headings = [
             s["line"]
