@@ -94,6 +94,19 @@ def _fetch_api(api_base: str, page: str) -> dict | None:
         return None
 
 
+def _is_login_wall(soup: BeautifulSoup) -> bool:
+    """Return True if the page is a wiki login wall rather than real content."""
+    # MediaWiki login pages always link to Special:UserLogin
+    if soup.find("a", href=lambda h: h and "Special:UserLogin" in h):
+        return True
+    title_tag = soup.find("title")
+    if title_tag:
+        t = title_tag.get_text().lower()
+        if "log in" in t or "login required" in t:
+            return True
+    return False
+
+
 def _fetch_html(url: str) -> dict | None:
     """Scrape page HTML directly. Returns a partial parse-like dict or None."""
     resp = requests.get(url, timeout=15, headers=_HEADERS)
@@ -101,9 +114,11 @@ def _fetch_html(url: str) -> dict | None:
         return None
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # Detect Cloudflare challenge page
+    # Detect Cloudflare challenge or wiki login wall
     title_tag = soup.find("title")
     if title_tag and "just a moment" in title_tag.get_text().lower():
+        return None
+    if _is_login_wall(soup):
         return None
 
     # Title
