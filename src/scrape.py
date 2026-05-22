@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import os
+import re
 import requests
+import frontmatter
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from tqdm import tqdm
 from markdownify import markdownify as md_convert
+
+from utils import slugify
 
 _HEADERS = {
     "User-Agent": (
@@ -18,7 +21,6 @@ _HEADERS = {
     )
 }
 
-# Fandom wiki CSS selectors for structured metadata
 _INFOBOX_SEL = "aside.portable-infobox"
 _CATEGORY_SEL = (
     ".page-header__categories a, "
@@ -27,7 +29,6 @@ _CATEGORY_SEL = (
     ".categories a"
 )
 _CONTENT_SEL = ("div.mw-parser-output", "div#mw-content-text")
-# Elements inside content that add noise without useful text
 _STRIP_CLASSES = {
     "toc", "navbox", "ambox", "noprint",
     "mw-editsection", "reference", "reflist",
@@ -35,20 +36,22 @@ _STRIP_CLASSES = {
 }
 
 
+def _url_to_filename(url: str) -> str:
+    segment = urlparse(url).path.rstrip("/").split("/")[-1]
+    slug = slugify(segment) if segment else "index"
+    return f"{slug}.md"
+
+
 def _extract_title(soup: BeautifulSoup, url: str) -> str:
-    """Return the best available page title."""
-    # Prefer the visible page heading
     for sel in ("h1.page-header__title", "h1.firstHeading", "h1"):
         el = soup.select_one(sel)
         if el:
             return el.get_text(strip=True)
-    # Fall back to <title>, stripping the " | Site Name" suffix
     tag = soup.find("title")
     if tag:
         return tag.get_text(strip=True).split("|")[0].strip()
-    # Last resort: derive from URL
-    stem = urlparse(url).path.rstrip("/").split("/")[-1]
-    return stem.replace("_", " ").replace("-", " ")
+    segment = urlparse(url).path.rstrip("/").split("/")[-1]
+    return segment.replace("_", " ").replace("-", " ")
 
 
 def _extract_headings(content: BeautifulSoup) -> list[str]:
@@ -64,7 +67,6 @@ def _extract_categories(soup: BeautifulSoup) -> list[str]:
     cats: list[str] = []
     for a in soup.select(_CATEGORY_SEL):
         text = a.get_text(strip=True)
-        # Skip empty, single-char index links ("A", "B", ...) and "N more" buttons
         if not text or len(text) <= 1 or re.match(r"^\d+ more$", text, re.IGNORECASE):
             continue
         if text not in seen:
@@ -86,19 +88,16 @@ def _extract_infobox(soup: BeautifulSoup) -> dict[str, str]:
             val = value_el.get_text(separator=" ", strip=True)
             if key and val:
                 infobox[key] = val
-    # Remove infobox from the tree so it doesn't appear in markdown text
     aside.decompose()
     return infobox
 
 
 def _extract_text(soup: BeautifulSoup) -> str:
-    """Return main page content as markdown, falling back to plain paragraphs."""
     content = None
     for sel in _CONTENT_SEL:
         content = soup.select_one(sel)
         if content:
             break
-
     if content:
         for unwanted in content.find_all(
             ["div", "table", "span", "ul"],
@@ -106,7 +105,6 @@ def _extract_text(soup: BeautifulSoup) -> str:
         ):
             unwanted.decompose()
         return md_convert(str(content), heading_style="ATX", bullets="-")
-
     return "\n".join(p.get_text() for p in soup.find_all("p"))
 
 
@@ -125,17 +123,14 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
 
         title = _extract_title(soup, url)
         categories = _extract_categories(soup)
-        infobox = _extract_infobox(soup)  # also removes the aside from soup
+        infobox = _extract_infobox(soup)
 
-        # Find content element before headings extraction so we only get
-        # article headings, not site-chrome headings.
         content_el = None
         for sel in _CONTENT_SEL:
             content_el = soup.select_one(sel)
             if content_el:
                 break
         headings = _extract_headings(content_el if content_el else soup)
-
         text = _extract_text(soup)
 
         results.append({
@@ -169,30 +164,44 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
     return new_links
 
 
-def save_progress(output_path: str, results: list[dict]) -> None:
-    """Append new results to the output file."""
+def save_progress(output_dir: str, results: list[dict]) -> None:
+    """Write each result as a markdown file with YAML frontmatter."""
+    os.makedirs(output_dir, exist_ok=True)
+    visited_path = os.path.join(output_dir, "_visited.txt")
     try:
-        existing_results = []
-        if os.path.exists(output_path):
-            with open(output_path, "r") as f:
-                existing_results = json.load(f)
-        all_results = existing_results + results
-        with open(output_path, "w") as f:
-            json.dump(all_results, f, indent=2)
-        print(f"Progress saved to {output_path}")
+        with open(visited_path, "a") as vf:
+            for doc in results:
+                filename = _url_to_filename(doc["url"])
+                filepath = os.path.join(output_dir, filename)
+                # Avoid clobbering if two URLs hash to the same slug
+                if os.path.exists(filepath):
+                    base = filename[:-3]
+                    i = 1
+                    while os.path.exists(filepath):
+                        filepath = os.path.join(output_dir, f"{base}_{i}.md")
+                        i += 1
+
+                text = doc.pop("text", "")
+                post = frontmatter.Post(text, **doc)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(frontmatter.dumps(post))
+                doc["text"] = text  # restore for caller
+
+                vf.write(doc["url"] + "\n")
+        print(f"Progress saved to {output_dir}")
     except Exception as e:
         print(f"Error saving progress: {e}")
 
 
-def load_progress(output_path: str) -> tuple[list[dict], set[str]]:
-    """Load progress from output file, returning (results, visited_urls)."""
-    if os.path.exists(output_path):
+def load_progress(output_dir: str) -> tuple[list[dict], set[str]]:
+    """Load visited URLs from the index file."""
+    visited_path = os.path.join(output_dir, "_visited.txt")
+    if os.path.exists(visited_path):
         try:
-            with open(output_path, "r") as f:
-                results = json.load(f)
-            visited = {entry["url"] for entry in results}
-            print(f"Loaded progress from {output_path}, {len(visited)} URLs already processed.")
-            return results, visited
+            with open(visited_path) as f:
+                visited = {line.strip() for line in f if line.strip()}
+            print(f"Loaded progress from {output_dir}, {len(visited)} URLs already processed.")
+            return [], visited
         except Exception as e:
             print(f"Error loading progress: {e}")
     return [], set()
@@ -200,17 +209,17 @@ def load_progress(output_path: str) -> tuple[list[dict], set[str]]:
 
 def run_scraping(
     seed_file: str,
-    output_path: str,
+    output_dir: str,
     max_pages: int = 100,
     max_depth: int = 2,
     max_threads: int = 5,
     save_interval: int = 10,
 ) -> None:
-    """Scrape lore pages from wiki seeds and save to output file."""
+    """Scrape lore pages from wiki seeds and save as markdown files."""
     with open(seed_file) as f:
         seeds = [line.strip() for line in f if line.strip()]
 
-    results, visited = load_progress(output_path)
+    results, visited = load_progress(output_dir)
     queue = [(url, 0) for url in seeds if url not in visited]
     domain = urlparse(seeds[0]).netloc
 
@@ -240,8 +249,8 @@ def run_scraping(
                 processed_count += 1
                 pbar.update(1)
                 if processed_count % save_interval == 0:
-                    save_progress(output_path, results)
+                    save_progress(output_dir, results)
                     results.clear()
 
-    save_progress(output_path, results)
+    save_progress(output_dir, results)
     results.clear()

@@ -1,5 +1,6 @@
 beautifulsoup4
 markdownify
+python-frontmatter
 spacy>=3.8
 requests
 openai>=1.0.0

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import chromadb
+import frontmatter
 import tiktoken
 import spacy
 import re
@@ -99,8 +101,18 @@ def run_embedding(input_path: str, vector_db_path: str, use_local: bool = False,
             metadata={"hnsw:space": "cosine"},
         )
 
-    with open(input_path) as f:
-        documents = json.load(f)
+    if os.path.isdir(input_path):
+        documents = []
+        for fname in sorted(os.listdir(input_path)):
+            if fname.endswith(".md") and not fname.startswith("_"):
+                with open(os.path.join(input_path, fname), encoding="utf-8") as f:
+                    post = frontmatter.load(f)
+                doc = dict(post.metadata)
+                doc["text"] = post.content
+                documents.append(doc)
+    else:
+        with open(input_path) as f:
+            documents = json.load(f)
 
     prepared = []
     with tqdm(total=len(documents), desc="Processing Documents") as doc_pbar:
