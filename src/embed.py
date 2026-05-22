@@ -124,8 +124,11 @@ def run_embedding(input_path: str, vector_db_path: str, use_local: bool = False,
                 doc_pbar.update(1)
                 continue
 
-            # Strip wiki-relative links, keeping only the display text
-            text = re.sub(r'\[([^\]]+)\]\(/wiki/[^)]+\)', r'\1', text)
+            # Strip all inline markdown links, keeping only the display text.
+            # Handles /wiki/ paths, /web/ Wayback paths, and full http(s) URLs.
+            # One level of nested parens is allowed for title attributes like
+            # (page does not exist) inside the link destination.
+            text = re.sub(r'\[([^\]]+)\]\([^()]*(?:\([^()]*\)[^()]*)*\)', r'\1', text)
 
             title = doc.get("title")
             if not title:
