@@ -17,6 +17,12 @@ _HEADERS = {
     "User-Agent": "ModelTagger/1.0 (wiki scraper; contact via github.com/timbroder/ModelTagger)"
 }
 
+# Domains that block all automated access — skip immediately rather than
+# burning time on API + HTML + Wayback fallbacks
+_BLOCKED_DOMAINS = {
+    "wh40k.lexicanum.com",
+}
+
 # Elements inside rendered HTML that add noise without useful text
 _CATEGORY_NOISE = {"Categories", "categories", "Category", "category", "Hidden categories"}
 
@@ -207,6 +213,10 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
     url, depth, max_depth, visited, results = args
     if url in visited or depth > max_depth:
         return None
+    if urlparse(url).netloc in _BLOCKED_DOMAINS:
+        print(f"  Skipping {url} — domain is blocklisted")
+        visited.add(url)
+        return []
     visited.add(url)
     print(f"Scraping ({len(visited)}): {url}")
 
