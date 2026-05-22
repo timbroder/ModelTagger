@@ -118,12 +118,14 @@ def run_embedding(input_path: str, vector_db_path: str, use_local: bool = False,
     with tqdm(total=len(documents), desc="Processing Documents") as doc_pbar:
         for doc in documents:
             text = doc["text"]
-            # Strip wiki-relative links, keeping only the display text
-            text = re.sub(r'\[([^\]]+)\]\(/wiki/[^)]+\)', r'\1', text)
             url = doc["url"]
-            if not text.strip():
+            # Skip redirect pages and empty documents
+            if not text.strip() or text.lstrip().startswith("Redirect to:"):
                 doc_pbar.update(1)
                 continue
+
+            # Strip wiki-relative links, keeping only the display text
+            text = re.sub(r'\[([^\]]+)\]\(/wiki/[^)]+\)', r'\1', text)
 
             title = doc.get("title")
             if not title:
