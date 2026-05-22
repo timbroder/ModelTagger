@@ -19,7 +19,11 @@ _HEADERS = {
 
 # Domains that block all automated access — skip immediately rather than
 # burning time on API + HTML + Wayback fallbacks
-_BLOCKED_DOMAINS = {
+_BLOCKED_DOMAINS: set[str] = set()
+
+# Domains where the live site requires login or is rate-limited; go straight
+# to Wayback CDX to find a pre-login-wall snapshot
+_WAYBACK_ONLY_DOMAINS = {
     "wh40k.lexicanum.com",
 }
 
@@ -147,15 +151,45 @@ def _fetch_html(url: str) -> dict | None:
 
 
 def _fetch_wayback(url: str) -> dict | None:
-    """Fetch a page from the Wayback Machine when the live site is blocked.
+    """Fetch the most recent Wayback Machine snapshot for a URL."""
+    try:
+        return _fetch_html(f"https://web.archive.org/web/{url}")
+    except Exception:
+        return None
 
-    Requests the most recent snapshot directly without the availability API
-    (which is rate-limited). Wayback redirects to the latest snapshot or
-    returns 404 if nothing is archived.
+
+def _fetch_wayback_cdx(url: str) -> dict | None:
+    """Use the Wayback CDX API to find a pre-login-wall snapshot and fetch it.
+
+    Searches for 200-status snapshots between 2019 and 2023 (before most wikis
+    added mandatory login). Tries up to 5 candidate timestamps, newest first.
     """
     try:
-        wayback_url = f"https://web.archive.org/web/{url}"
-        return _fetch_html(wayback_url)
+        resp = requests.get(
+            "http://web.archive.org/cdx/search/cdx",
+            params={
+                "url": url,
+                "output": "json",
+                "fl": "timestamp,statuscode",
+                "filter": "statuscode:200",
+                "from": "20190101",
+                "to": "20230101",
+                "limit": 5,
+                "sort": "reverse",
+            },
+            timeout=20,
+            headers=_HEADERS,
+        )
+        if not resp.ok:
+            return None
+        rows = resp.json()
+        # rows[0] is the header; rows[1:] are results newest-first
+        for row in rows[1:]:
+            timestamp = row[0]
+            result = _fetch_html(f"https://web.archive.org/web/{timestamp}/{url}")
+            if result and result.get("text", {}).get("*", "").strip():
+                return result
+        return None
     except Exception:
         return None
 
@@ -213,7 +247,8 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
     url, depth, max_depth, visited, results = args
     if url in visited or depth > max_depth:
         return None
-    if urlparse(url).netloc in _BLOCKED_DOMAINS:
+    domain = urlparse(url).netloc
+    if domain in _BLOCKED_DOMAINS:
         print(f"  Skipping {url} — domain is blocklisted")
         visited.add(url)
         return []
@@ -223,15 +258,21 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
     new_links: list[tuple[str, int]] = []
     try:
         page = _page_title_from_url(url)
-        parsed = _fetch_api(_wiki_api_base(url), page)
-        via_html = False
-        if parsed is None:
-            parsed = _fetch_html(url)
-            via_html = True
-        if parsed is None:
-            parsed = _fetch_wayback(url)
+        if domain in _WAYBACK_ONLY_DOMAINS:
+            parsed = _fetch_wayback_cdx(url)
             if parsed:
-                print(f"  Using Wayback Machine snapshot for {url}")
+                print(f"  Using Wayback CDX snapshot for {url}")
+            else:
+                print(f"  Skipping {url} — Wayback CDX found no usable snapshot")
+                return new_links
+        else:
+            parsed = _fetch_api(_wiki_api_base(url), page)
+            if parsed is None:
+                parsed = _fetch_html(url)
+            if parsed is None:
+                parsed = _fetch_wayback(url)
+                if parsed:
+                    print(f"  Using Wayback Machine snapshot for {url}")
         if parsed is None:
             print(f"  Skipping {url} — API, HTML, and Wayback all failed")
             return new_links
@@ -271,7 +312,6 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
         })
 
         if depth < max_depth:
-            domain = urlparse(url).netloc
             for link in parsed.get("links", []):
                 if link.get("ns", -1) != 0:
                     continue
@@ -314,7 +354,7 @@ def save_progress(output_dir: str, results: list[dict]) -> None:
 
 
 def load_progress(output_dir: str) -> tuple[list[dict], set[str]]:
-    """Load visited URLs from the index file."""
+    """Load visited URLs from the index file, falling back to frontmatter scan."""
     visited_path = os.path.join(output_dir, "_visited.txt")
     if os.path.exists(visited_path):
         try:
@@ -324,6 +364,24 @@ def load_progress(output_dir: str) -> tuple[list[dict], set[str]]:
             return [], visited
         except Exception as e:
             print(f"Error loading progress: {e}")
+
+    # _visited.txt missing — rebuild from .md frontmatter so we don't re-scrape
+    if os.path.isdir(output_dir):
+        visited: set[str] = set()
+        for fname in os.listdir(output_dir):
+            if not fname.endswith(".md") or fname.startswith("_"):
+                continue
+            try:
+                post = frontmatter.load(os.path.join(output_dir, fname))
+                url = post.metadata.get("url")
+                if url:
+                    visited.add(url)
+            except Exception:
+                pass
+        if visited:
+            print(f"Rebuilt progress from .md files in {output_dir}, {len(visited)} URLs already processed.")
+        return [], visited
+
     return [], set()
 
 
