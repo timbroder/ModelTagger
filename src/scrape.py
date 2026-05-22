@@ -41,9 +41,9 @@ def _wayback_get(url: str, max_retries: int = 4, **kwargs) -> requests.Response 
             time.sleep(wait)
         try:
             resp = requests.get(url, timeout=20, headers=_HEADERS, **kwargs)
-            if resp.status_code == 429:
+            if resp.status_code in (429, 503):
                 delay = min(600, 120 * 2 ** attempt)  # 2min, 4min, 8min, capped at 10min
-                print(f"  [Wayback] 429 Too Many Requests — backing off {delay}s ({delay//60}min)")
+                print(f"  [Wayback] {resp.status_code} rate limited — backing off {delay}s ({delay//60}min)")
                 with _wayback_lock:
                     _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
                 time.sleep(delay)
@@ -262,16 +262,26 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
         if cdx_resp is None or not cdx_resp.ok:
             return None
         rows = cdx_resp.json()
+        print(f"  [Wayback CDX] {len(rows) - 1} snapshots to try for {url}")
         for row in rows[1:]:  # skip header row
             wayback_url = f"https://web.archive.org/web/{row[0]}/{url}"
             page_resp = _wayback_get(wayback_url)
             if page_resp is None:
+                print(f"  [Wayback CDX] {row[0]}: _wayback_get returned None")
+                continue
+            if not page_resp.ok:
+                print(f"  [Wayback CDX] {row[0]}: HTTP {page_resp.status_code}, skipping")
                 continue
             result = _fetch_html(wayback_url, resp=page_resp)
             if result and result.get("text", {}).get("*", "").strip():
+                print(f"  [Wayback CDX] {row[0]}: found usable content")
                 return result
+            print(f"  [Wayback CDX] {row[0]}: login wall or empty content")
         return None
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"  [Wayback CDX] exception: {e}")
+        traceback.print_exc()
         return None
 
 
