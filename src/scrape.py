@@ -140,6 +140,20 @@ def _fetch_html(url: str) -> dict | None:
     }
 
 
+def _fetch_wayback(url: str) -> dict | None:
+    """Fetch a page from the Wayback Machine when the live site is blocked.
+
+    Requests the most recent snapshot directly without the availability API
+    (which is rate-limited). Wayback redirects to the latest snapshot or
+    returns 404 if nothing is archived.
+    """
+    try:
+        wayback_url = f"https://web.archive.org/web/{url}"
+        return _fetch_html(wayback_url)
+    except Exception:
+        return None
+
+
 def _parse_infobox(soup: BeautifulSoup) -> dict[str, str]:
     infobox: dict[str, str] = {}
     for sel in _INFOBOX_SELS:
@@ -205,7 +219,11 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
             parsed = _fetch_html(url)
             via_html = True
         if parsed is None:
-            print(f"  Skipping {url} — both API and HTML requests failed")
+            parsed = _fetch_wayback(url)
+            if parsed:
+                print(f"  Using Wayback Machine snapshot for {url}")
+        if parsed is None:
+            print(f"  Skipping {url} — API, HTML, and Wayback all failed")
             return new_links
 
         title = parsed.get("title", page)
@@ -221,14 +239,16 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
             if s.get("toclevel", 1) <= 2
         ]
 
-        # Reuse soup from HTML fallback to avoid double-parsing
-        soup = parsed.pop("_soup", None)
-        if soup is None:
-            html = parsed.get("text", {}).get("*", "")
-            soup = BeautifulSoup(html, "html.parser")
+        content_html = parsed.get("text", {}).get("*", "")
+        full_page_soup = parsed.pop("_soup", None)
 
-        infobox = _parse_infobox(soup)
-        text = _html_to_markdown(str(soup))
+        # _soup is the full page (HTML fallback path) — use it for infobox
+        # detection since the infobox may sit outside the content div.
+        # For text conversion always use the content div HTML so navigation
+        # and sidebars are excluded.
+        infobox_soup = full_page_soup if full_page_soup is not None else BeautifulSoup(content_html, "html.parser")
+        infobox = _parse_infobox(infobox_soup)
+        text = _html_to_markdown(content_html)
 
         results.append({
             "url": url,
