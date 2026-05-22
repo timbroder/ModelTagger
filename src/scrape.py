@@ -95,15 +95,30 @@ def _fetch_api(api_base: str, page: str) -> dict | None:
 
 
 def _is_login_wall(soup: BeautifulSoup) -> bool:
-    """Return True if the page is a wiki login wall rather than real content."""
-    # MediaWiki login pages always link to Special:UserLogin
-    if soup.find("a", href=lambda h: h and "Special:UserLogin" in h):
-        return True
+    """Return True if the page is a wiki login wall rather than real content.
+
+    A login wall has Special:UserLogin as the *primary* content — not just in
+    the nav bar, which every MediaWiki page includes. We detect it by checking
+    the article content div specifically, or by a login-only page title.
+    """
     title_tag = soup.find("title")
     if title_tag:
         t = title_tag.get_text().lower()
         if "log in" in t or "login required" in t:
             return True
+
+    # Check the article body only, not the full page (nav has login link everywhere)
+    content = soup.select_one("div.mw-parser-output, div#mw-content-text")
+    if content:
+        if content.find("a", href=lambda h: h and "Special:UserLogin" in h):
+            return True
+        # Suspiciously short article text is also a login wall signal
+        if len(content.get_text(strip=True)) < 100:
+            return True
+    elif soup.find("a", href=lambda h: h and "Special:UserLogin" in h):
+        # No content div at all — if login link is present, it's a wall
+        return True
+
     return False
 
 
