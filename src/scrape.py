@@ -42,16 +42,16 @@ def _wayback_get(url: str, max_retries: int = 4, **kwargs) -> requests.Response 
         try:
             resp = requests.get(url, timeout=20, headers=_HEADERS, **kwargs)
             if resp.status_code == 429:
-                delay = min(120, 10 * 2 ** attempt)
-                print(f"  [Wayback] 429 Too Many Requests — backing off {delay}s")
+                delay = min(600, 120 * 2 ** attempt)  # 2min, 4min, 8min, capped at 10min
+                print(f"  [Wayback] 429 Too Many Requests — backing off {delay}s ({delay//60}min)")
                 with _wayback_lock:
                     _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
                 time.sleep(delay)
                 continue
             return resp
         except requests.exceptions.ConnectionError:
-            delay = min(120, 10 * 2 ** attempt)
-            print(f"  [Wayback] connection refused — backing off {delay}s")
+            delay = min(600, 120 * 2 ** attempt)  # 2min, 4min, 8min, capped at 10min
+            print(f"  [Wayback] connection refused — backing off {delay}s ({delay//60}min)")
             with _wayback_lock:
                 _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
             time.sleep(delay)
