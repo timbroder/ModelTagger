@@ -173,12 +173,8 @@ def _fetch_wayback(url: str) -> dict | None:
         return None
 
 
-def _fetch_wayback_cdx(url: str) -> dict | None:
-    """Use the Wayback CDX API to find a pre-login-wall snapshot and fetch it.
-
-    Searches for 200-status snapshots between 2019 and 2023 (before most wikis
-    added mandatory login). Tries up to 5 candidate timestamps, newest first.
-    """
+def _cdx_timestamps(url: str, sort: str = "reverse", limit: int = 10) -> list[str]:
+    """Return a list of CDX-indexed 200-status timestamps for url."""
     try:
         resp = requests.get(
             "http://web.archive.org/cdx/search/cdx",
@@ -188,24 +184,47 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
                 "fl": "timestamp,statuscode",
                 "filter": "statuscode:200",
                 "from": "20190101",
-                "limit": 10,
-                "sort": "reverse",
+                "limit": limit,
+                "sort": sort,
             },
             timeout=20,
             headers=_HEADERS,
         )
         if not resp.ok:
-            return None
+            return []
         rows = resp.json()
-        # rows[0] is the header; rows[1:] are results newest-first
-        for row in rows[1:]:
-            timestamp = row[0]
-            result = _fetch_html(f"https://web.archive.org/web/{timestamp}/{url}")
-            if result and result.get("text", {}).get("*", "").strip():
-                return result
-        return None
+        return [row[0] for row in rows[1:]]  # skip header row
     except Exception:
-        return None
+        return []
+
+
+def _try_timestamps(url: str, timestamps: list[str]) -> dict | None:
+    """Fetch the first timestamp that returns real (non-login-wall) content."""
+    for ts in timestamps:
+        result = _fetch_html(f"https://web.archive.org/web/{ts}/{url}")
+        if result and result.get("text", {}).get("*", "").strip():
+            return result
+    return None
+
+
+def _fetch_wayback_cdx(url: str) -> dict | None:
+    """Use the Wayback CDX API to find a usable snapshot and fetch it.
+
+    Pass 1: try the 10 most recent 200-status snapshots (newest content first).
+    Pass 2: if all fail (e.g. all are login walls), try the 10 oldest snapshots
+    from 2019 onward to reach pre-login-wall era archives.
+    _is_login_wall() in _fetch_html filters out login-wall pages automatically.
+    """
+    recent = _cdx_timestamps(url, sort="reverse", limit=10)
+    result = _try_timestamps(url, recent)
+    if result:
+        return result
+
+    # Recent snapshots exhausted — try oldest-first to find pre-login-wall content
+    oldest = _cdx_timestamps(url, sort="", limit=10)
+    # Avoid re-fetching timestamps we already tried
+    already_tried = set(recent)
+    return _try_timestamps(url, [ts for ts in oldest if ts not in already_tried])
 
 
 def _parse_infobox(soup: BeautifulSoup) -> dict[str, str]:
