@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import time
+import threading
 import requests
 import frontmatter
 from bs4 import BeautifulSoup
@@ -16,6 +18,46 @@ from utils import slugify
 _HEADERS = {
     "User-Agent": "ModelTagger/1.0 (wiki scraper; contact via github.com/timbroder/ModelTagger)"
 }
+
+# Shared backoff state for Wayback Machine requests (across threads)
+_wayback_lock = threading.Lock()
+_wayback_pause_until: float = 0.0
+
+
+def _wayback_get(url: str, max_retries: int = 4, **kwargs) -> requests.Response | None:
+    """GET a Wayback Machine URL with rate-limit and connection-refused backoff.
+
+    Accepts the same keyword args as requests.get (e.g. params=).
+    On HTTP 429 or ConnectionError the pause time is extended exponentially
+    (10s, 20s, 40s, 80s) and shared across all threads so the whole scraper
+    backs off together rather than piling on.
+    """
+    global _wayback_pause_until
+    for attempt in range(max_retries):
+        with _wayback_lock:
+            wait = _wayback_pause_until - time.time()
+        if wait > 0:
+            print(f"  [Wayback] rate limited — pausing {wait:.0f}s")
+            time.sleep(wait)
+        try:
+            resp = requests.get(url, timeout=20, headers=_HEADERS, **kwargs)
+            if resp.status_code == 429:
+                delay = min(120, 10 * 2 ** attempt)
+                print(f"  [Wayback] 429 Too Many Requests — backing off {delay}s")
+                with _wayback_lock:
+                    _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
+                time.sleep(delay)
+                continue
+            return resp
+        except requests.exceptions.ConnectionError:
+            delay = min(120, 10 * 2 ** attempt)
+            print(f"  [Wayback] connection refused — backing off {delay}s")
+            with _wayback_lock:
+                _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
+            time.sleep(delay)
+    print(f"  [Wayback] giving up after {max_retries} attempts: {url}")
+    return None
+
 
 # Domains that block all automated access — skip immediately rather than
 # burning time on API + HTML + Wayback fallbacks
@@ -122,9 +164,14 @@ def _is_login_wall(soup: BeautifulSoup) -> bool:
     return False
 
 
-def _fetch_html(url: str) -> dict | None:
-    """Scrape page HTML directly. Returns a partial parse-like dict or None."""
-    resp = requests.get(url, timeout=15, headers=_HEADERS)
+def _fetch_html(url: str, resp: requests.Response | None = None) -> dict | None:
+    """Scrape page HTML directly. Returns a partial parse-like dict or None.
+
+    If ``resp`` is provided (e.g. already fetched via _wayback_get) it is used
+    directly; otherwise a fresh GET is issued.
+    """
+    if resp is None:
+        resp = requests.get(url, timeout=15, headers=_HEADERS)
     if not resp.ok:
         return None
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -183,7 +230,8 @@ def _fetch_html(url: str) -> dict | None:
 def _fetch_wayback(url: str) -> dict | None:
     """Fetch the most recent Wayback Machine snapshot for a URL."""
     try:
-        return _fetch_html(f"https://web.archive.org/web/{url}")
+        resp = _wayback_get(f"https://web.archive.org/web/{url}")
+        return _fetch_html(f"https://web.archive.org/web/{url}", resp=resp) if resp else None
     except Exception:
         return None
 
@@ -194,10 +242,11 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
     Fetches one representative snapshot per calendar month (collapse=timestamp:6),
     sorted newest-first, up to 72 months (~6 years). Stops as soon as a
     non-login-wall snapshot is found. _is_login_wall() in _fetch_html rejects
-    login-wall pages automatically.
+    login-wall pages automatically. All Wayback requests go through _wayback_get
+    so 429s and connection refusals trigger shared exponential backoff.
     """
     try:
-        resp = requests.get(
+        cdx_resp = _wayback_get(
             "http://web.archive.org/cdx/search/cdx",
             params={
                 "url": url,
@@ -205,18 +254,20 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
                 "fl": "timestamp",
                 "filter": "statuscode:200",
                 "from": "20190101",
-                "collapse": "timestamp:6",  # one snapshot per month
-                "limit": 72,               # up to 6 years of monthly snapshots
+                "collapse": "timestamp:6",
+                "limit": 72,
                 "sort": "reverse",
             },
-            timeout=20,
-            headers=_HEADERS,
         )
-        if not resp.ok:
+        if cdx_resp is None or not cdx_resp.ok:
             return None
-        rows = resp.json()
+        rows = cdx_resp.json()
         for row in rows[1:]:  # skip header row
-            result = _fetch_html(f"https://web.archive.org/web/{row[0]}/{url}")
+            wayback_url = f"https://web.archive.org/web/{row[0]}/{url}"
+            page_resp = _wayback_get(wayback_url)
+            if page_resp is None:
+                continue
+            result = _fetch_html(wayback_url, resp=page_resp)
             if result and result.get("text", {}).get("*", "").strip():
                 return result
         return None
