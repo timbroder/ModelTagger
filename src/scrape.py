@@ -64,7 +64,10 @@ def _extract_categories(soup: BeautifulSoup) -> list[str]:
     cats: list[str] = []
     for a in soup.select(_CATEGORY_SEL):
         text = a.get_text(strip=True)
-        if text and text not in seen:
+        # Skip empty, single-char index links ("A", "B", ...) and "N more" buttons
+        if not text or len(text) <= 1 or re.match(r"^\d+ more$", text, re.IGNORECASE):
+            continue
+        if text not in seen:
             seen.add(text)
             cats.append(text)
     return cats
