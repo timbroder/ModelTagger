@@ -42,13 +42,14 @@ def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) ->
     is being throttled and not worth waiting for.
     """
     global _wayback_pause_until, _wayback_last_request
-    # Enforce global rate limit before each attempt (1 req/sec across all threads)
+    # Reserve a time slot for this request (sleep OUTSIDE the lock so threads
+    # queue their slots in parallel rather than firing all at once after the lock).
     with _wayback_rate_lock:
-        now = time.time()
-        gap = _wayback_last_request + _WAYBACK_MIN_INTERVAL - now
-        if gap > 0:
-            time.sleep(gap)
-        _wayback_last_request = time.time()
+        fire_at = max(time.time(), _wayback_last_request + _WAYBACK_MIN_INTERVAL)
+        _wayback_last_request = fire_at
+    gap = fire_at - time.time()
+    if gap > 0:
+        time.sleep(gap)
     for attempt in range(max_retries):
         with _wayback_lock:
             wait = _wayback_pause_until - time.time()
