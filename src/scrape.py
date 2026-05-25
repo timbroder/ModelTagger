@@ -30,16 +30,23 @@ _wayback_last_request: float = 0.0
 _WAYBACK_MIN_INTERVAL = 1.1  # seconds
 
 
-def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) -> requests.Response | None:
+def _wayback_get(
+    url: str,
+    max_retries: int = 4,
+    timeout: int = 10,
+    shared_backoff_on_error: bool = False,
+    **kwargs,
+) -> requests.Response | None:
     """GET a Wayback Machine URL with rate-limit and connection-refused backoff.
 
     Accepts the same keyword args as requests.get (e.g. params=).
-    On HTTP 429/503 or network error the pause time is extended exponentially
-    (2min, 4min, 8min, capped at 10min) and shared across all threads so the
-    whole scraper backs off together rather than piling on.
+    On HTTP 429/503 the pause time is extended exponentially (2min→4min→8min→10min)
+    and shared across all threads so the whole scraper backs off together.
 
-    timeout=10s: Wayback pages average 1.5s, high-end ~6s. Anything slower
-    is being throttled and not worth waiting for.
+    shared_backoff_on_error=True: connection errors also trigger the shared
+    backoff (use for CDX queries where a timeout means the API is overloaded,
+    not a transient single-hop failure). False (default): short per-thread
+    retry (5s→10s→20s→30s) so one bad snapshot fetch doesn't stall everyone.
     """
     global _wayback_pause_until, _wayback_last_request
     # Reserve a time slot for this request (sleep OUTSIDE the lock so threads
@@ -68,9 +75,15 @@ def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) ->
                 continue
             return resp
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            # Transient network error — short local retry, don't punish all threads
-            delay = min(30, 5 * 2 ** attempt)  # 5s, 10s, 20s, 30s
-            print(f"  [Wayback] connection error/timeout — retrying in {delay}s")
+            if shared_backoff_on_error:
+                # CDX overload: pause all threads so we don't pile on a struggling API
+                delay = min(120, 15 * 2 ** attempt)  # 15s, 30s, 60s, 120s
+                print(f"  [Wayback] CDX timeout — shared backoff {delay}s")
+                with _wayback_lock:
+                    _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
+            else:
+                delay = min(30, 5 * 2 ** attempt)  # 5s, 10s, 20s, 30s
+                print(f"  [Wayback] connection error/timeout — retrying in {delay}s")
             time.sleep(delay)
     print(f"  [Wayback] giving up after {max_retries} attempts: {url}")
     return None
@@ -270,7 +283,9 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
     try:
         cdx_resp = _wayback_get(
             "http://web.archive.org/cdx/search/cdx",
-            timeout=15,  # CDX is a DB query — give it a bit more headroom
+            timeout=10,
+            max_retries=2,
+            shared_backoff_on_error=True,
             params={
                 "url": url,
                 "output": "json",
