@@ -139,12 +139,27 @@ def _fetch_api(api_base: str, page: str) -> dict | None:
         return None
 
 
+def _best_content_div(soup: BeautifulSoup):
+    """Return the content div with the most text, preferring mw-parser-output.
+
+    Some Lexicanum layouts put a login notice inside mw-parser-output but the
+    real article text directly inside mw-content-text. Picking the larger div
+    handles both cases.
+    """
+    candidates = [soup.select_one(sel) for sel in ("div.mw-parser-output", "div#mw-content-text")]
+    candidates = [c for c in candidates if c is not None]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: len(c.get_text(strip=True)))
+
+
 def _is_login_wall(soup: BeautifulSoup) -> bool:
     """Return True if the page is a wiki login wall rather than real content.
 
-    A login wall has Special:UserLogin as the *primary* content — not just in
-    the nav bar, which every MediaWiki page includes. We detect it by checking
-    the article content div specifically, or by a login-only page title.
+    A real login wall has no article text — just a short notice. We detect it
+    by page title or by the best content div being suspiciously short.
+    The presence of a Special:UserLogin link is NOT used here because Lexicanum
+    embeds a "Log in" notice inside the content div on every anonymous page.
     """
     title_tag = soup.find("title")
     if title_tag:
@@ -152,16 +167,10 @@ def _is_login_wall(soup: BeautifulSoup) -> bool:
         if "log in" in t or "login required" in t:
             return True
 
-    # Check the article body only, not the full page (nav has login link everywhere)
-    content = soup.select_one("div.mw-parser-output, div#mw-content-text")
-    if content:
-        if content.find("a", href=lambda h: h and "Special:UserLogin" in h):
-            return True
-        # Suspiciously short article text is also a login wall signal
-        if len(content.get_text(strip=True)) < 100:
-            return True
-    elif soup.find("a", href=lambda h: h and "Special:UserLogin" in h):
-        # No content div at all — if login link is present, it's a wall
+    content = _best_content_div(soup)
+    if content is None:
+        return True
+    if len(content.get_text(strip=True)) < 100:
         return True
 
     return False
@@ -205,12 +214,8 @@ def _fetch_html(url: str, resp: requests.Response | None = None) -> dict | None:
             seen.add(text)
             cats.append(text)
 
-    # Headings from content div
-    content = None
-    for sel in ("div.mw-parser-output", "div#mw-content-text"):
-        content = soup.select_one(sel)
-        if content:
-            break
+    # Headings from content div (pick whichever has more text)
+    content = _best_content_div(soup)
     headings = [h.get_text(strip=True) for h in (content or soup).find_all(["h2", "h3"]) if h.get_text(strip=True)]
 
     # Links for crawling
