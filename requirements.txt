@@ -1,6 +1,7 @@
 beautifulsoup4
 markdownify
-spacy>=3.7,<3.8
+python-frontmatter
+spacy>=3.8
 requests
 openai>=1.0.0
 tiktoken
