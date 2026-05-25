@@ -24,13 +24,16 @@ _wayback_lock = threading.Lock()
 _wayback_pause_until: float = 0.0
 
 
-def _wayback_get(url: str, max_retries: int = 4, **kwargs) -> requests.Response | None:
+def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) -> requests.Response | None:
     """GET a Wayback Machine URL with rate-limit and connection-refused backoff.
 
     Accepts the same keyword args as requests.get (e.g. params=).
-    On HTTP 429 or ConnectionError the pause time is extended exponentially
-    (10s, 20s, 40s, 80s) and shared across all threads so the whole scraper
-    backs off together rather than piling on.
+    On HTTP 429/503 or network error the pause time is extended exponentially
+    (2min, 4min, 8min, capped at 10min) and shared across all threads so the
+    whole scraper backs off together rather than piling on.
+
+    timeout=10s: Wayback pages average 1.5s, high-end ~6s. Anything slower
+    is being throttled and not worth waiting for.
     """
     global _wayback_pause_until
     for attempt in range(max_retries):
@@ -40,7 +43,7 @@ def _wayback_get(url: str, max_retries: int = 4, **kwargs) -> requests.Response 
             print(f"  [Wayback] rate limited — pausing {wait:.0f}s")
             time.sleep(wait)
         try:
-            resp = requests.get(url, timeout=20, headers=_HEADERS, **kwargs)
+            resp = requests.get(url, timeout=timeout, headers=_HEADERS, **kwargs)
             if resp.status_code in (429, 503):
                 delay = min(600, 120 * 2 ** attempt)  # 2min, 4min, 8min, capped at 10min
                 print(f"  [Wayback] {resp.status_code} rate limited — backing off {delay}s ({delay//60}min)")
@@ -248,6 +251,7 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
     try:
         cdx_resp = _wayback_get(
             "http://web.archive.org/cdx/search/cdx",
+            timeout=15,  # CDX is a DB query — give it a bit more headroom
             params={
                 "url": url,
                 "output": "json",
@@ -268,6 +272,7 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
             return None
         print(f"  [Wayback CDX] {n} snapshots to try for {url}")
         for row in rows[1:]:  # skip header row
+            time.sleep(1)  # Wayback rate limit is ~1 req/sec; stay under it
             wayback_url = f"https://web.archive.org/web/{row[0]}/{url}"
             page_resp = _wayback_get(wayback_url)
             if page_resp is None:
