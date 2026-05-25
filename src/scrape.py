@@ -58,7 +58,8 @@ def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) ->
         try:
             resp = requests.get(url, timeout=timeout, headers=_HEADERS, **kwargs)
             if resp.status_code in (429, 503):
-                delay = min(600, 120 * 2 ** attempt)  # 2min, 4min, 8min, capped at 10min
+                # Explicit rate limit — apply shared exponential backoff so all threads pause
+                delay = min(600, 120 * 2 ** attempt)
                 print(f"  [Wayback] {resp.status_code} rate limited — backing off {delay}s ({delay//60}min)")
                 with _wayback_lock:
                     _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
@@ -66,10 +67,9 @@ def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) ->
                 continue
             return resp
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            delay = min(600, 120 * 2 ** attempt)  # 2min, 4min, 8min, capped at 10min
-            print(f"  [Wayback] connection error/timeout — backing off {delay}s ({delay//60}min)")
-            with _wayback_lock:
-                _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
+            # Transient network error — short local retry, don't punish all threads
+            delay = min(30, 5 * 2 ** attempt)  # 5s, 10s, 20s, 30s
+            print(f"  [Wayback] connection error/timeout — retrying in {delay}s")
             time.sleep(delay)
     print(f"  [Wayback] giving up after {max_retries} attempts: {url}")
     return None
