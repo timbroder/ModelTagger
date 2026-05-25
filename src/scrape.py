@@ -23,6 +23,12 @@ _HEADERS = {
 _wayback_lock = threading.Lock()
 _wayback_pause_until: float = 0.0
 
+# Global per-request rate limiter — enforces ≥1.1s between any two Wayback
+# requests regardless of thread count, keeping us under ~1 req/sec.
+_wayback_rate_lock = threading.Lock()
+_wayback_last_request: float = 0.0
+_WAYBACK_MIN_INTERVAL = 1.1  # seconds
+
 
 def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) -> requests.Response | None:
     """GET a Wayback Machine URL with rate-limit and connection-refused backoff.
@@ -35,7 +41,14 @@ def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) ->
     timeout=10s: Wayback pages average 1.5s, high-end ~6s. Anything slower
     is being throttled and not worth waiting for.
     """
-    global _wayback_pause_until
+    global _wayback_pause_until, _wayback_last_request
+    # Enforce global rate limit before each attempt (1 req/sec across all threads)
+    with _wayback_rate_lock:
+        now = time.time()
+        gap = _wayback_last_request + _WAYBACK_MIN_INTERVAL - now
+        if gap > 0:
+            time.sleep(gap)
+        _wayback_last_request = time.time()
     for attempt in range(max_retries):
         with _wayback_lock:
             wait = _wayback_pause_until - time.time()
@@ -277,7 +290,6 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
             return None
         print(f"  [Wayback CDX] {n} snapshots to try for {url}")
         for row in rows[1:]:  # skip header row
-            time.sleep(1)  # Wayback rate limit is ~1 req/sec; stay under it
             wayback_url = f"https://web.archive.org/web/{row[0]}/{url}"
             page_resp = _wayback_get(wayback_url)
             if page_resp is None:
