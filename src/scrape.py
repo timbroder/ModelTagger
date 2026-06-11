@@ -8,7 +8,7 @@ import requests
 import frontmatter
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, unquote, quote
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 from tqdm import tqdm
 from markdownify import markdownify as md_convert
@@ -28,6 +28,28 @@ _wayback_pause_until: float = 0.0
 _wayback_rate_lock = threading.Lock()
 _wayback_last_request: float = 0.0
 _WAYBACK_MIN_INTERVAL = 1.1  # seconds
+
+# Guards the shared visited set and results list across scraper threads
+_visited_lock = threading.Lock()
+_results_lock = threading.Lock()
+
+# Per-domain politeness limiter for live (non-Wayback) sites — enforces a
+# minimum gap between any two requests to the same domain across all threads
+_domain_rate_lock = threading.Lock()
+_domain_last_request: dict[str, float] = {}
+_DOMAIN_MIN_INTERVAL = 1.0  # seconds
+
+
+def _polite_get(url: str, **kwargs) -> requests.Response:
+    """requests.get with a per-domain minimum interval shared across threads."""
+    domain = urlparse(url).netloc
+    with _domain_rate_lock:
+        fire_at = max(time.time(), _domain_last_request.get(domain, 0.0) + _DOMAIN_MIN_INTERVAL)
+        _domain_last_request[domain] = fire_at
+    gap = fire_at - time.time()
+    if gap > 0:
+        time.sleep(gap)
+    return requests.get(url, headers=_HEADERS, **kwargs)
 
 
 def _wayback_get(
@@ -154,7 +176,7 @@ def _fetch_api(api_base: str, page: str) -> dict | None:
         "format": "json",
     }
     try:
-        resp = requests.get(api_base, params=params, timeout=15, headers=_HEADERS)
+        resp = _polite_get(api_base, params=params, timeout=15)
         if resp.status_code in (403, 404):
             return None
         resp.raise_for_status()
@@ -210,7 +232,7 @@ def _fetch_html(url: str, resp: requests.Response | None = None) -> dict | None:
     directly; otherwise a fresh GET is issued.
     """
     if resp is None:
-        resp = requests.get(url, timeout=15, headers=_HEADERS)
+        resp = _polite_get(url, timeout=15)
     if not resp.ok:
         return None
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -376,14 +398,14 @@ def _html_to_markdown(html: str) -> str:
 def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
     """Fetch a wiki page (API first, HTML fallback) and append a document record to results."""
     url, depth, max_depth, visited, results = args
-    if url in visited or depth > max_depth:
-        return None
+    with _visited_lock:
+        if url in visited or depth > max_depth:
+            return None
+        visited.add(url)
     domain = urlparse(url).netloc
     if domain in _BLOCKED_DOMAINS:
         print(f"  Skipping {url} — domain is blocklisted")
-        visited.add(url)
         return []
-    visited.add(url)
     print(f"Scraping ({len(visited)}): {url}")
 
     new_links: list[tuple[str, int]] = []
@@ -432,15 +454,16 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
         infobox = _parse_infobox(infobox_soup)
         text = _html_to_markdown(content_html)
 
-        results.append({
-            "url": url,
-            "title": title,
-            "text": text,
-            "scraped_at": datetime.now(timezone.utc).isoformat(),
-            "headings": headings,
-            "categories": categories,
-            "infobox": infobox,
-        })
+        with _results_lock:
+            results.append({
+                "url": url,
+                "title": title,
+                "text": text,
+                "scraped_at": datetime.now(timezone.utc).isoformat(),
+                "headings": headings,
+                "categories": categories,
+                "infobox": infobox,
+            })
 
         if depth < max_depth:
             for link in parsed.get("links", []):
@@ -534,28 +557,38 @@ def run_scraping(
     if not queue:
         print("All seed URLs have already been visited. Add more seeds to continue scraping.")
 
+    def drain_results() -> list[dict]:
+        """Atomically snapshot and clear the shared results list."""
+        with _results_lock:
+            batch = list(results)
+            results.clear()
+        return batch
+
     with ThreadPoolExecutor(max_threads) as executor, tqdm(
-        total=len(seeds), initial=len(visited), desc="Scraping"
+        total=max_pages, initial=min(len(visited), max_pages), desc="Scraping"
     ) as pbar:
-        future_to_url: dict = {}
+        in_flight: set = set()
         processed_count = 0
-        while queue and len(visited) < max_pages:
-            while queue and len(future_to_url) < max_threads:
+        # Rolling window: top the pool back up after every completion instead
+        # of draining a whole batch before submitting more work
+        while (queue or in_flight) and len(visited) < max_pages:
+            while queue and len(in_flight) < max_threads and len(visited) + len(in_flight) < max_pages:
                 url, depth = queue.pop(0)
                 args = (url, depth, max_depth, visited, results)
-                future_to_url[executor.submit(scrape_url, args)] = url
+                in_flight.add(executor.submit(scrape_url, args))
+            if not in_flight:
+                break
 
-            for future in as_completed(future_to_url):
+            done, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in done:
                 new_links = future.result()
                 if new_links:
                     queue.extend(new_links)
-                del future_to_url[future]
-
                 processed_count += 1
                 pbar.update(1)
                 if processed_count % save_interval == 0:
-                    save_progress(output_dir, results)
-                    results.clear()
+                    save_progress(output_dir, drain_results())
+        # Exiting the with-block waits for any still-running futures, whose
+        # documents land in `results` and are picked up by the final save
 
-    save_progress(output_dir, results)
-    results.clear()
+    save_progress(output_dir, drain_results())

@@ -158,6 +158,8 @@ def run_embedding(input_path: str, vector_db_path: str, use_local: bool = False,
             batch_docs = all_docs[i:i + batch_size]
             batch_metas = all_metas[i:i + batch_size]
             batch_ids = all_ids[i:i + batch_size]
-            collection.add(documents=batch_docs, metadatas=batch_metas, ids=batch_ids)
+            # upsert keeps re-runs idempotent: existing chunk IDs are updated
+            # in place instead of erroring or duplicating
+            collection.upsert(documents=batch_docs, metadatas=batch_metas, ids=batch_ids)
             pbar.update(len(batch_docs))
 
