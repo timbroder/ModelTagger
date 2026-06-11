@@ -44,6 +44,11 @@ def _add_scrape_opts(p):
 def _add_embed_opts(p):
     p.add_argument('--embed-model', default='BAAI/bge-m3',
                    help='SentenceTransformer embedding model (local mode only)')
+    p.add_argument('--min-chunk-tokens', type=int,
+                   help='Min tokens per chunk (default: 300 local, 80 otherwise)')
+    p.add_argument('--max-chunk-tokens', type=int,
+                   help='Max tokens per chunk (default: 800 local, 200 otherwise — '
+                        "the default embedder truncates input at 256 wordpieces)")
 
 
 def _add_tag_opts(p):
@@ -121,6 +126,8 @@ def main():
             args.vector_db_path or preset['vector_db'],
             use_local=args.use_local,
             embed_model=args.embed_model,
+            min_chunk_tokens=args.min_chunk_tokens,
+            max_chunk_tokens=args.max_chunk_tokens,
         )
 
     if args.step in ('tag', 'all'):
