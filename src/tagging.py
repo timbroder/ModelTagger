@@ -16,7 +16,8 @@ import re
 import requests
 from utils import slugify
 
-logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+# Resolve config relative to the repo root so the CLI works from any cwd
+_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 # Lazy-initialized OpenAI client
 _openai_client = None
@@ -40,9 +41,11 @@ def extract_to_temp(file_path: Path) -> Path | None:
         elif ext in [".stl", ".obj", ".png"]:
             shutil.copy(file_path, temp_dir / file_path.name)
         else:
+            shutil.rmtree(temp_dir, ignore_errors=True)
             return None
     except Exception as e:
         print(f"Extraction failed: {e}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
         return None
 
     return temp_dir
@@ -116,8 +119,6 @@ def ask_local_model(prompt: str, model: str) -> str:
 
 def ask_openai(prompt: str, model: str = "gpt-4.1", retries: int = 3) -> tuple[str, int]:
     """Send a prompt to OpenAI and return (response_text, total_tokens)."""
-    enc = get_tokenizer(model)
-    prompt_tokens = len(enc.encode(prompt))
     for attempt in range(retries):
         try:
             response = get_openai_client().chat.completions.create(
@@ -130,12 +131,15 @@ def ask_openai(prompt: str, model: str = "gpt-4.1", retries: int = 3) -> tuple[s
                 max_tokens=150
             )
             completion_text = response.choices[0].message.content
-            completion_tokens = len(enc.encode(completion_text))
-            return completion_text, prompt_tokens + completion_tokens
+            if response.usage is not None:
+                total_tokens = response.usage.total_tokens
+            else:
+                total_tokens = count_tokens(prompt, model) + count_tokens(completion_text, model)
+            return completion_text, total_tokens
         except Exception as e:
             print(f"[OpenAI Retry {attempt + 1}] Error: {e}")
             if attempt == retries - 1:
-                return "unknown", prompt_tokens
+                return "unknown", count_tokens(prompt, model)
             time.sleep(2 ** attempt)
 
 
@@ -174,7 +178,8 @@ def run_tagging(
     rerank_model: str = "BAAI/bge-reranker-base",
 ) -> None:
     """Tag 3D model files using RAG with lore from the vector database."""
-    with open("config/tagging_presets.json") as f:
+    logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+    with open(_CONFIG_DIR / "tagging_presets.json") as f:
         presets = json.load(f)[mode]
 
     vector_db_path = vector_db_path or presets["vector_db"]
@@ -243,57 +248,47 @@ def run_tagging(
                 normalized_base_name = " ".join(deduped_words)
 
                 slugified_term = slugify(normalized_base_name)
-                superset = {}
 
-                # Retrieve candidate chunks from the vector DB that mention the base name.
-                # Fall back to the unfiltered query if none are found.
-                results = collection.query(
-                    query_texts=[joined_names],
-                    n_results=10,
-                    where_document={"$contains": normalized_base_name},
-                    where={"slug": {"$eq": slugified_term}},
-                )
+                # Retrieve candidate chunks: try the slug-filtered and
+                # substring-filtered queries first, falling back to an
+                # unfiltered query only when neither returns anything.
+                # Among the candidate result sets, keep the one whose best
+                # match is closest.
+                filtered_specs = [
+                    {
+                        "where_document": {"$contains": normalized_base_name},
+                        "where": {"slug": {"$eq": slugified_term}},
+                    },
+                    {"where_document": {"$contains": normalized_base_name}},
+                ]
+                candidates = []  # (results, filtered) pairs with non-empty documents
+                for spec in filtered_specs:
+                    results = collection.query(query_texts=[joined_names], n_results=10, **spec)
+                    if results["documents"][0]:
+                        candidates.append((results, True))
+                if not candidates:
+                    results = collection.query(query_texts=[joined_names], n_results=10)
+                    if results["documents"][0]:
+                        candidates.append((results, False))
 
-                documents = results["documents"][0]
-                distances = results["distances"][0]
+                if not candidates:
+                    print(f"Skipping {path.name} — no lore found in vector DB")
+                    logging.warning(f"No lore retrieved for {path.name}")
+                    writer.writerow([path.name, ""])
+                    processed.add(path.name)
+                    continue
 
-                if documents:
-                    superset[distances[0]] = results
+                best_results, filtered = min(candidates, key=lambda c: c[0]["distances"][0][0])
+                documents = best_results["documents"][0]
+                distances = best_results["distances"][0]
 
-                results = collection.query(
-                    query_texts=[joined_names],
-                    n_results=10,
-                    where_document={"$contains": normalized_base_name},
-                )
-
-                documents = results["documents"][0]
-                distances = results["distances"][0]
-
-                if documents:
-                    superset[distances[0]] = results
-
-                if not documents:
-                    results = collection.query(
-                        query_texts=[joined_names],
-                        n_results=10,
-                    )
-
-                    documents = results["documents"][0]
-                    distances = results["distances"][0]
-
-                    superset[distances[0]] = results
-
-                min_results = superset[min(superset.keys())]
-                documents = min_results["documents"][0]
-                distances = min_results["distances"][0]
-
-                # Choose the best result set based on the closest distance
                 if rerank:
                     scores = cross_encoder.predict([(joined_names, d) for d in documents])
                     ranked = [d for d, _ in sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)]
                     confident_docs = ranked[:8]
                 else:
-                    filtered = bool(documents)
+                    # Filtered queries already guarantee relevance, so allow a
+                    # looser distance threshold than the unfiltered fallback
                     confidence_threshold = 0.3 if filtered else 0.1
                     confident_docs = [
                         doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
@@ -341,11 +336,8 @@ def run_tagging(
                     print(f"Tagged {path.name} [local] using ~{token_count} tokens")
                     logging.info(f"Tagged {path.name} | Tokens: {token_count} | local mode")
                 else:
-                    cost_estimate = token_count / 1000 * 0.01
-                    print(f"Tagged {path.name} using ~{token_count} tokens (${cost_estimate:.4f})")
-                    logging.info(
-                        f"Tagged {path.name} | Tokens: {token_count} | Cost: ${cost_estimate:.4f}"
-                    )
+                    print(f"Tagged {path.name} using {token_count} tokens")
+                    logging.info(f"Tagged {path.name} | Tokens: {token_count}")
             except Exception as e:
                 print(f"Error processing {path.name}: {e}")
                 logging.error(f"Tagging failed for {path.name}: {e}")

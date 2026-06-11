@@ -1,27 +1,52 @@
 # 🧠 Warhammer & D&D Miniature Tagger
 
-[![Tests](https://github.com/OWNER/ModelTagger/actions/workflows/tests.yml/badge.svg)](https://github.com/OWNER/ModelTagger/actions/workflows/tests.yml)
+[![Tests](https://github.com/timbroder/ModelTagger/actions/workflows/tests.yml/badge.svg)](https://github.com/timbroder/ModelTagger/actions/workflows/tests.yml)
 
-This project uses a Retrieval-Augmented Generation (RAG) pipeline to:
-1. Scrape lore from Fandom / Lexicanum
-2. Embed it in a vector database (Chroma)
-3. Analyze STL/OBJ/image ZIPs and generate intelligent tag suggestions
-4. Upload tags to Manyfold (optional)
+A Retrieval-Augmented Generation (RAG) pipeline that auto-tags tabletop
+miniature files (STL/OBJ/archives) with lore-aligned tags:
+
+1. **Scrape** lore from MediaWiki sites (Fandom, Lexicanum) into markdown files
+2. **Embed** it into a Chroma vector database
+3. **Tag** miniature files using retrieved lore + an LLM (OpenAI or local Ollama)
+4. **Upload** tags to Manyfold *(currently a dry run — see below)*
 
 ---
 
 ## 📁 Project Structure
 
 ```
-warhammer_tagger/
-├── src/                    # Core logic (scrape, embed, tag, upload)
-├── seeds/                 # Lore seed URLs (D&D, Warhammer)
-├── config/                # Prompt presets and vector paths
-├── data/zips/             # STL, OBJ, PNG, or archive files to tag
-├── outputs/               # Generated tag CSV
-├── requirements.txt       # Python dependencies
-├── README.md              # You're here!
+ModelTagger/
+├── src/                   # Pipeline steps (main.py dispatches each one)
+│   ├── main.py            # CLI entry point
+│   ├── scrape.py          # Wiki crawler (API → HTML → Wayback fallbacks)
+│   ├── embed.py           # Chunking + Chroma embedding
+│   ├── tagging.py         # RAG retrieval + LLM tagging
+│   ├── manyfold_ingest.py # Manyfold upload (dry-run stub)
+│   └── backfill_slugs.py  # One-off: add slug metadata to old Chroma DBs
+├── config/                # Prompt presets and default vector DB paths
+├── tools/                 # Shell scripts to harvest seed URL lists
+├── tests/                 # pytest suite (runs offline, all network mocked)
+├── requirements.txt       # Core dependencies
+└── requirements-local.txt # Extra deps for local mode (torch, etc.)
 ```
+
+You provide two inputs that are not checked in:
+
+- a **seeds file** — one wiki URL per line (generate one with the
+  `tools/` scripts, see below)
+- a folder of **miniature files** to tag (`.zip`, `.rar`, `.7z` archives or
+  loose `.stl`, `.obj`, `.png` files)
+
+## 🛠 Setup
+
+```bash
+pip install -r requirements.txt        # OpenAI mode
+pip install -r requirements-local.txt  # + local mode (SentenceTransformers, reranker)
+```
+
+OpenAI mode requires `OPENAI_API_KEY` in your environment (used for tag
+*generation*; embeddings always run locally — Chroma's built-in model by
+default, or a SentenceTransformer with `--use-local`).
 
 ---
 
@@ -30,85 +55,112 @@ warhammer_tagger/
 ### 1. Scrape Lore
 
 ```bash
-python src/main.py --step scrape --seeds seeds/warhammer_seeds.txt --output outputs/lore.json
+python src/main.py --step scrape --seeds seeds/warhammer_seeds.txt --output lore/warhammer \
+    --max-pages 1000 --max-depth 2
+```
+
+Writes one markdown file per page (YAML frontmatter with title, URL,
+categories, headings, and parsed infobox) into the output directory.
+
+Worth knowing for long scrapes:
+
+- **Resumable.** Progress is saved every 10 pages to `_visited.txt` in the
+  output dir; re-running the same command skips already-scraped URLs. If
+  `_visited.txt` is deleted, it is rebuilt from the markdown frontmatter.
+- **Fallback chain.** Each page is fetched via the MediaWiki API first, then
+  raw HTML, then the most recent Wayback Machine snapshot. Login walls and
+  Cloudflare challenges are detected and rejected.
+- **Lexicanum goes through Wayback.** `wh40k.lexicanum.com` is hardcoded to
+  skip the live site (login wall) and search Wayback's CDX API for a usable
+  snapshot, newest first.
+- **Rate limiting.** Wayback requests are globally limited to ~1/sec with
+  shared exponential backoff on 429/503; live sites get a 1 req/sec per-domain
+  politeness delay. Expect roughly one page per second — plan accordingly.
+- The crawler follows same-domain `/wiki/` links up to `--max-depth` and stops
+  at `--max-pages` total pages.
+
+#### Generating a seeds file
+
+```bash
+tools/get_urls.sh         # every page on warhammer40k.fandom.com (allpages API)
+tools/scrape_sitemap.sh   # every page on wh40k.lexicanum.com (sitemap)
 ```
 
 ### 2. Embed Lore into Vector DB
 
 ```bash
-python src/main.py --step embed --output outputs/lore.json --vector-db-path .chroma/warhammer
+python src/main.py --step embed --output lore/warhammer --vector-db-path .chroma/warhammer
 ```
 
-> **Updating old embeddings:** If you embedded lore before the `slug` field was
-> introduced, you can add slugs to existing records without re-running the
-> entire embedding step. Iterate over your Chroma collection, derive a slug from
-> each `source` URL, and update the metadata in place:
+`--output` here is the scrape output: either the markdown directory, or a
+legacy `lore.json` from older versions. Text is chunked into 300–800-token
+windows on sentence boundaries with ~20% overlap, prefixed with the page
+title, and stored in a Chroma collection named `lore` (cosine distance).
+Re-running is safe — chunks are upserted by ID.
 
-```python
-from urllib.parse import urlparse
-from chromadb import PersistentClient
-from utils import slugify
-
-client = PersistentClient(path=".chroma/warhammer")
-col = client.get_collection("lore")
-items = col.get(include=["metadatas"])
-
-for item_id, meta in zip(items["ids"], items["metadatas"]):
-    url = meta["source"]
-    slug = slugify(urlparse(url).path.rstrip("/").split("/")[-1])
-    col.update(ids=[item_id], metadatas=[{**meta, "slug": slug}])
-```
-
-Or run the provided utility to backfill slugs automatically:
-
-```bash
-python src/backfill_slugs.py --vector-db-path .chroma/warhammer --collection lore
-```
+> **Updating old embeddings:** if you embedded lore before the `slug`
+> metadata field existed, backfill it without re-embedding:
+>
+> ```bash
+> python src/backfill_slugs.py --vector-db-path .chroma/warhammer --collection lore
+> ```
 
 ### 3. Tag Miniature Files
 
 ```bash
-python src/main.py --step tag --zips data/zips --output outputs/tags.csv --vector-db-path .chroma/warhammer --mode warhammer
+python src/main.py --step tag --zips data/zips --tag-output tags.csv \
+    --vector-db-path .chroma/warhammer --mode warhammer --model gpt-4o
 ```
+
+For each archive/file: extracts it, validates the contents (must contain a
+3D model or image; archives with executables are skipped), cleans dates and
+symbols out of the filenames, retrieves the most relevant lore chunks from
+Chroma (exact slug match → substring match → unfiltered, keeping whichever
+set matches closest), and asks the LLM for tags within `--token-budget`.
+
+- Results append to the `--tag-output` CSV (`filename, tags`); already-listed
+  files are skipped, so re-running resumes where it left off.
+- `--mode warhammer|dnd` selects a prompt preset from
+  `config/tagging_presets.json`; `--prompt-override` replaces it entirely.
+- If generation fails, raw lore snippets are written as fallback tags and the
+  failure is logged to `tagging.log`.
 
 ### 🏠 Local Mode (Ollama + bge-m3)
 
-Prerequisites:
-
 ```bash
-pip install sentence-transformers torch
-# optional reranker
-pip install transformers
+pip install -r requirements-local.txt
 
-# run local LLM (the script will pull the model if missing)
-# macOS (via Homebrew)
-brew install ollama
-# Linux
-curl -fsSL https://ollama.com/install.sh | sh
-# start the Ollama service
+# install and start Ollama
+brew install ollama          # macOS
+curl -fsSL https://ollama.com/install.sh | sh   # Linux
 ollama serve
 ```
 
-Embedding and tagging with local models:
-
 ```bash
-python src/main.py --step embed --output outputs/lore.json --vector-db-path .chroma/local \
+python src/main.py --step embed --output lore/warhammer --vector-db-path .chroma/local \
     --use-local --embed-model BAAI/bge-m3
 
-python src/main.py --step tag --zips data/zips --output outputs/tags.csv \
+python src/main.py --step tag --zips data/zips --tag-output tags.csv \
+    --vector-db-path .chroma/local --mode warhammer \
     --use-local --local-model llama3.1:8b-instruct --rerank \
     --rerank-model BAAI/bge-reranker-base --token-budget 3000
 ```
 
-The tagging step will automatically pull `--local-model` from Ollama if it's not already installed.
+The tagging step pulls `--local-model` from Ollama automatically if missing.
+`--rerank` re-orders retrieved chunks with a cross-encoder before building
+the prompt (works in OpenAI mode too).
 
 ### 4. Upload to Manyfold
 
 ```bash
-python src/main.py --step upload --csv outputs/tags.csv
+python src/main.py --step upload --csv tags.csv
 ```
 
 Set `MANYFOLD_API_URL` and `MANYFOLD_API_TOKEN` in your environment.
+
+> ⚠️ **Dry run only.** This step currently checks whether each model already
+> exists in Manyfold and prints what it *would* upload. The actual file
+> upload / tag POST is not implemented yet.
 
 ---
 
@@ -119,24 +171,27 @@ Set `MANYFOLD_API_URL` and `MANYFOLD_API_TOKEN` in your environment.
 
 ---
 
-## 🔄 RAG Flow Diagram
+## 🧪 Tests
 
-- `main.py` dispatches each step
-- `scrape.py` crawls lore pages
-- `embed.py` stores paragraphs in Chroma
-- `tagging.py` uses GPT + Chroma to suggest tags
-- `manyfold_ingest.py` checks if model exists, then uploads
+```bash
+pip install pytest -r requirements.txt
+pytest -q
+```
+
+All network and model calls are mocked; no API keys, GPU, or torch install
+needed.
 
 ---
 
-## 🧠 Tag Prompt Logic
+## 📄 License
 
-You can override prompts or use presets in `config/tagging_presets.json`.
+[MIT](LICENSE)
 
---- 
+---
 
 ## ✅ Coming Next
 
+- Complete the Manyfold upload step
 - Docker support
 - Folder watching for auto-trigger
-- Vision tagging with clip embeddings
+- Vision tagging with CLIP embeddings

@@ -9,7 +9,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--step', required=True, choices=['scrape', 'embed', 'tag', 'upload'])
     parser.add_argument('--seeds', help='Path to seed URLs file')
-    parser.add_argument('--output', help='Output file for lore ')
+    parser.add_argument('--output', help='Directory for scraped lore markdown files')
     parser.add_argument('--tag-output', help='Output tag results')
     parser.add_argument('--max-pages', type=int, default=100)
     parser.add_argument('--max-depth', type=int, default=2)
@@ -42,7 +42,7 @@ def main():
             args.zips,
             args.tag_output,
             args.vector_db_path,
-            None,
+            args.prompt_override,
             args.mode,
             use_local=args.use_local,
             local_model=args.local_model,

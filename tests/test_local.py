@@ -197,6 +197,48 @@ def test_tagging_skips_logged_files(tmp_path, monkeypatch):
     assert len(rows) == 2
 
 
+def test_empty_vector_db_skips_gracefully(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "m.stl").write_text("mesh")
+    out_csv = tmp_path / "tags.csv"
+    vector_path = tmp_path / "db"
+
+    mock_col = MagicMock()
+    mock_col.query.return_value = {"documents": [[]], "distances": [[]]}
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.requests.post") as mock_post:
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
+
+    # No LLM call should have been made and the file logged with empty tags
+    assert not any(call.args[0].endswith("/api/generate") for call in mock_post.call_args_list)
+    rows = list(csv.reader(open(out_csv)))
+    assert rows[1] == ["m.stl", ""]
+
+
+def test_main_wires_prompt_override(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    import main
+
+    captured = {}
+
+    def fake_run_tagging(zips, out, db, prompt_override, mode, **kwargs):
+        captured["prompt_override"] = prompt_override
+
+    monkeypatch.setattr(main, "run_tagging", fake_run_tagging)
+    monkeypatch.setattr(sys, "argv", [
+        "main.py", "--step", "tag", "--zips", "z", "--tag-output", "t.csv",
+        "--prompt-override", "custom prompt",
+    ])
+    main.main()
+    assert captured["prompt_override"] == "custom prompt"
+
+
 def test_logs_failed_file(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     zips = tmp_path / "zips"

@@ -26,3 +26,8 @@ warhammer_lore copy 2.json
 warhammer_lore copy diybke.json
 sample.xlsx
 src/vid.py
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

@@ -1,0 +1,6 @@
+# Extra dependencies for local mode (--use-local / --rerank):
+# SentenceTransformer embeddings and cross-encoder reranking.
+-r requirements.txt
+sentence-transformers>=3,<6
+transformers>=4.41,<5
+torch>=2.2,<3
