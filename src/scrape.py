@@ -23,19 +23,40 @@ _HEADERS = {
 _wayback_lock = threading.Lock()
 _wayback_pause_until: float = 0.0
 
+# Global per-request rate limiter — enforces ≥1.1s between any two Wayback
+# requests regardless of thread count, keeping us under ~1 req/sec.
+_wayback_rate_lock = threading.Lock()
+_wayback_last_request: float = 0.0
+_WAYBACK_MIN_INTERVAL = 1.1  # seconds
 
-def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) -> requests.Response | None:
+
+def _wayback_get(
+    url: str,
+    max_retries: int = 4,
+    timeout: int = 10,
+    shared_backoff_on_error: bool = False,
+    **kwargs,
+) -> requests.Response | None:
     """GET a Wayback Machine URL with rate-limit and connection-refused backoff.
 
     Accepts the same keyword args as requests.get (e.g. params=).
-    On HTTP 429/503 or network error the pause time is extended exponentially
-    (2min, 4min, 8min, capped at 10min) and shared across all threads so the
-    whole scraper backs off together rather than piling on.
+    On HTTP 429/503 the pause time is extended exponentially (2min→4min→8min→10min)
+    and shared across all threads so the whole scraper backs off together.
 
-    timeout=10s: Wayback pages average 1.5s, high-end ~6s. Anything slower
-    is being throttled and not worth waiting for.
+    shared_backoff_on_error=True: connection errors also trigger the shared
+    backoff (use for CDX queries where a timeout means the API is overloaded,
+    not a transient single-hop failure). False (default): short per-thread
+    retry (5s→10s→20s→30s) so one bad snapshot fetch doesn't stall everyone.
     """
-    global _wayback_pause_until
+    global _wayback_pause_until, _wayback_last_request
+    # Reserve a time slot for this request (sleep OUTSIDE the lock so threads
+    # queue their slots in parallel rather than firing all at once after the lock).
+    with _wayback_rate_lock:
+        fire_at = max(time.time(), _wayback_last_request + _WAYBACK_MIN_INTERVAL)
+        _wayback_last_request = fire_at
+    gap = fire_at - time.time()
+    if gap > 0:
+        time.sleep(gap)
     for attempt in range(max_retries):
         with _wayback_lock:
             wait = _wayback_pause_until - time.time()
@@ -45,7 +66,8 @@ def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) ->
         try:
             resp = requests.get(url, timeout=timeout, headers=_HEADERS, **kwargs)
             if resp.status_code in (429, 503):
-                delay = min(600, 120 * 2 ** attempt)  # 2min, 4min, 8min, capped at 10min
+                # Explicit rate limit — apply shared exponential backoff so all threads pause
+                delay = min(600, 120 * 2 ** attempt)
                 print(f"  [Wayback] {resp.status_code} rate limited — backing off {delay}s ({delay//60}min)")
                 with _wayback_lock:
                     _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
@@ -53,10 +75,15 @@ def _wayback_get(url: str, max_retries: int = 4, timeout: int = 10, **kwargs) ->
                 continue
             return resp
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            delay = min(600, 120 * 2 ** attempt)  # 2min, 4min, 8min, capped at 10min
-            print(f"  [Wayback] connection error/timeout — backing off {delay}s ({delay//60}min)")
-            with _wayback_lock:
-                _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
+            if shared_backoff_on_error:
+                # CDX overload: pause all threads so we don't pile on a struggling API
+                delay = min(120, 15 * 2 ** attempt)  # 15s, 30s, 60s, 120s
+                print(f"  [Wayback] CDX timeout — shared backoff {delay}s")
+                with _wayback_lock:
+                    _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
+            else:
+                delay = min(30, 5 * 2 ** attempt)  # 5s, 10s, 20s, 30s
+                print(f"  [Wayback] connection error/timeout — retrying in {delay}s")
             time.sleep(delay)
     print(f"  [Wayback] giving up after {max_retries} attempts: {url}")
     return None
@@ -139,12 +166,27 @@ def _fetch_api(api_base: str, page: str) -> dict | None:
         return None
 
 
+def _best_content_div(soup: BeautifulSoup):
+    """Return the content div with the most text, preferring mw-parser-output.
+
+    Some Lexicanum layouts put a login notice inside mw-parser-output but the
+    real article text directly inside mw-content-text. Picking the larger div
+    handles both cases.
+    """
+    candidates = [soup.select_one(sel) for sel in ("div.mw-parser-output", "div#mw-content-text")]
+    candidates = [c for c in candidates if c is not None]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: len(c.get_text(strip=True)))
+
+
 def _is_login_wall(soup: BeautifulSoup) -> bool:
     """Return True if the page is a wiki login wall rather than real content.
 
-    A login wall has Special:UserLogin as the *primary* content — not just in
-    the nav bar, which every MediaWiki page includes. We detect it by checking
-    the article content div specifically, or by a login-only page title.
+    A real login wall has no article text — just a short notice. We detect it
+    by page title or by the best content div being suspiciously short.
+    The presence of a Special:UserLogin link is NOT used here because Lexicanum
+    embeds a "Log in" notice inside the content div on every anonymous page.
     """
     title_tag = soup.find("title")
     if title_tag:
@@ -152,16 +194,10 @@ def _is_login_wall(soup: BeautifulSoup) -> bool:
         if "log in" in t or "login required" in t:
             return True
 
-    # Check the article body only, not the full page (nav has login link everywhere)
-    content = soup.select_one("div.mw-parser-output, div#mw-content-text")
-    if content:
-        if content.find("a", href=lambda h: h and "Special:UserLogin" in h):
-            return True
-        # Suspiciously short article text is also a login wall signal
-        if len(content.get_text(strip=True)) < 100:
-            return True
-    elif soup.find("a", href=lambda h: h and "Special:UserLogin" in h):
-        # No content div at all — if login link is present, it's a wall
+    content = _best_content_div(soup)
+    if content is None:
+        return True
+    if len(content.get_text(strip=True)) < 100:
         return True
 
     return False
@@ -205,12 +241,8 @@ def _fetch_html(url: str, resp: requests.Response | None = None) -> dict | None:
             seen.add(text)
             cats.append(text)
 
-    # Headings from content div
-    content = None
-    for sel in ("div.mw-parser-output", "div#mw-content-text"):
-        content = soup.select_one(sel)
-        if content:
-            break
+    # Headings from content div (pick whichever has more text)
+    content = _best_content_div(soup)
     headings = [h.get_text(strip=True) for h in (content or soup).find_all(["h2", "h3"]) if h.get_text(strip=True)]
 
     # Links for crawling
@@ -251,7 +283,9 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
     try:
         cdx_resp = _wayback_get(
             "http://web.archive.org/cdx/search/cdx",
-            timeout=15,  # CDX is a DB query — give it a bit more headroom
+            timeout=10,
+            max_retries=2,
+            shared_backoff_on_error=True,
             params={
                 "url": url,
                 "output": "json",
@@ -272,7 +306,6 @@ def _fetch_wayback_cdx(url: str) -> dict | None:
             return None
         print(f"  [Wayback CDX] {n} snapshots to try for {url}")
         for row in rows[1:]:  # skip header row
-            time.sleep(1)  # Wayback rate limit is ~1 req/sec; stay under it
             wayback_url = f"https://web.archive.org/web/{row[0]}/{url}"
             page_resp = _wayback_get(wayback_url)
             if page_resp is None:
