@@ -51,6 +51,13 @@ def _add_embed_opts(p):
                         "the default embedder truncates input at 256 wordpieces)")
 
 
+def _add_upload_opts(p):
+    p.add_argument('--library-path', help='Manyfold library folder to stage new models into '
+                                          '(default: $MANYFOLD_LIBRARY_PATH)')
+    p.add_argument('--dry-run', action='store_true', help='Report what would change without writing')
+    p.add_argument('--limit', type=int, help='Stop after this many staged/updated models')
+
+
 def _add_tag_opts(p):
     p.add_argument('--zips', required=True, help='Path to folder of ZIPs/STLs to tag')
     p.add_argument('--tag-output', help='Output CSV for tag results (default: preset tag_output)')
@@ -87,9 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_use_local(p)
     _add_tag_opts(p)
 
-    p = sub.add_parser('upload', help='Upload a tag CSV to Manyfold (dry run)')
+    p = sub.add_parser('upload', help='Sync a tag CSV into Manyfold (stage files, tags, collections)')
     _add_mode(p)
+    _add_upload_opts(p)
     p.add_argument('--csv', help='Path to tag CSV (default: preset tag_output)')
+    p.add_argument('--zips', help='Folder containing the model archives to stage')
+    p.add_argument('--check', action='store_true', help='Probe the Manyfold API capabilities and exit')
 
     p = sub.add_parser('all', help='Run scrape → embed → tag in one go')
     _add_mode(p)
@@ -99,6 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_scrape_opts(p)
     _add_embed_opts(p)
     _add_tag_opts(p)
+    _add_upload_opts(p)
     p.add_argument('--upload', action='store_true', help='Also run the upload step at the end')
 
     return parser
@@ -148,10 +159,23 @@ def main():
         )
 
     if args.step == 'upload':
-        run_upload(args.csv or preset['tag_output'])
+        run_upload(
+            args.csv or preset['tag_output'],
+            zips_dir=args.zips,
+            library_path=args.library_path,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            check=args.check,
+        )
     elif args.step == 'all' and args.upload:
         print("=== Upload ===")
-        run_upload(args.tag_output or preset['tag_output'])
+        run_upload(
+            args.tag_output or preset['tag_output'],
+            zips_dir=args.zips,
+            library_path=args.library_path,
+            dry_run=args.dry_run,
+            limit=args.limit,
+        )
 
 
 if __name__ == "__main__":

@@ -1,43 +1,265 @@
+from __future__ import annotations
+
 import csv
-import requests
+import json
 import os
+import re
+import shutil
+import tempfile
+from difflib import SequenceMatcher
+from pathlib import Path
+
+import patoolib
+from tqdm import tqdm
+
+from manyfold import ManyfoldClient, ManyfoldError, model_tags
+from utils import slugify
+
+# Structured fields owned by this pipeline across all modes — namespaced tags
+# with these prefixes are replaced on re-runs; everything else (manual tags
+# added in the Manyfold UI) is preserved.
+OWNED_NAMESPACES = [
+    "faction", "subfaction", "unit", "model_type", "role", "allegiance",
+    "equipment", "creature", "creature_type", "size", "class", "alignment",
+]
+
+# Fuzzy-match floor for mapping CSV filenames onto scanned Manyfold model
+# names. High on purpose: at thousands of models, tagging the wrong model is
+# worse than leaving one untagged.
+_MATCH_RATIO = 0.92
+
+_ARCHIVE_EXTS = {".zip", ".rar", ".7z"}
+_LOOSE_EXTS = {".stl", ".obj", ".png"}
 
 
-def model_exists(api_url: str, headers: dict, model_name: str) -> bool:
-    """Check if a model with the given name already exists in Manyfold."""
-    response = requests.get(
-        f"{api_url}/models?name={model_name}",
-        headers=headers
-    )
-    if response.status_code == 200:
-        data = response.json()
-        return any(model.get("name") == model_name for model in data)
-    return False
+def build_tags(row: dict) -> list[str]:
+    """Flatten a structured CSV row into namespaced + free-form tags."""
+    tags: list[str] = []
+    for ns in OWNED_NAMESPACES:
+        val = (row.get(ns) or "").strip()
+        for part in (p.strip() for p in val.split(",")):
+            if part:
+                tags.append(f"{ns}: {part}")
+    for t in (p.strip() for p in (row.get("tags") or "").split(",")):
+        if t:
+            tags.append(t)
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
 
 
-def run_upload(csv_path: str) -> None:
-    """Upload tags from CSV to Manyfold.
+def merge_tags(existing: list[str], new: list[str]) -> list[str]:
+    """Apply the update-owned-keep-manual policy.
 
-    NOTE: This function currently only logs intended uploads.
-    Actual file upload and tag posting to Manyfold API is not yet implemented.
-    To complete this, add requests to POST model files and PATCH tags.
+    Tags in pipeline-owned namespaces are replaced by the new set; all other
+    existing tags (manual edits) are preserved. Free-form pipeline tags are
+    added without removing anything.
+    """
+    owned_prefixes = tuple(f"{ns}:" for ns in OWNED_NAMESPACES)
+    kept = [t for t in existing if not t.lower().startswith(owned_prefixes)]
+    seen = {t.lower() for t in kept}
+    merged = list(kept)
+    for t in new:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            merged.append(t)
+    return merged
+
+
+def normalize_name(name: str) -> str:
+    """Normalize a filename or Manyfold model name for matching."""
+    return slugify(Path(name).stem.replace("+", " ").replace("_", " "))
+
+
+def match_model(filename: str, models_by_slug: dict[str, dict]) -> dict | None:
+    """Find the Manyfold model for a CSV filename: exact slug, then fuzzy."""
+    slug = normalize_name(filename)
+    if slug in models_by_slug:
+        return models_by_slug[slug]
+    best, best_ratio = None, 0.0
+    for s, m in models_by_slug.items():
+        r = SequenceMatcher(None, slug, s).ratio()
+        if r > best_ratio:
+            best, best_ratio = m, r
+    return best if best_ratio >= _MATCH_RATIO else None
+
+
+def _model_dir_name(filename: str) -> str:
+    """A filesystem-safe, human-readable folder name for the model."""
+    stem = Path(filename).stem.replace("+", " ").replace("_", " ")
+    stem = re.sub(r"[^0-9A-Za-z' \-]+", " ", stem)
+    return re.sub(r"\s+", " ", stem).strip() or slugify(filename)
+
+
+def stage_into_library(archive: Path, library_path: Path, tags: list[str]) -> Path:
+    """Extract/copy a model's files into the Manyfold library folder.
+
+    Archives are unpacked (a library scan won't look inside zips); loose
+    files are copied. A datapackage.json is written alongside so Manyfold
+    imports the tags at scan time.
+    """
+    dest = library_path / _model_dir_name(archive.name)
+    if dest.exists():
+        return dest  # already staged on a previous run
+
+    ext = archive.suffix.lower()
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        staging = tmp / "model"
+        staging.mkdir()
+        if ext in _ARCHIVE_EXTS:
+            patoolib.extract_archive(str(archive), outdir=str(staging))
+        elif ext in _LOOSE_EXTS:
+            shutil.copy(archive, staging / archive.name)
+        else:
+            raise ManyfoldError(f"Unsupported file type: {archive.name}")
+
+        with open(staging / "datapackage.json", "w", encoding="utf-8") as f:
+            json.dump({
+                "name": slugify(_model_dir_name(archive.name)),
+                "title": _model_dir_name(archive.name),
+                "keywords": tags,
+            }, f, indent=2)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(staging), str(dest))
+        return dest
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _collection_name(c: dict) -> str:
+    return (c.get("name") or c.get("title") or "").strip()
+
+
+def run_upload(
+    csv_path: str,
+    zips_dir: str | None = None,
+    library_path: str | None = None,
+    dry_run: bool = False,
+    limit: int | None = None,
+    check: bool = False,
+) -> None:
+    """Sync a structured tag CSV into Manyfold.
+
+    Existing models (matched by name) get namespaced tags applied with the
+    update-owned-keep-manual policy plus a faction collection. Missing models
+    are staged into the library folder (with a datapackage.json carrying
+    their tags) and a scan is triggered; run upload again after the scan
+    completes to apply collections to the newly scanned models.
     """
     api_url = os.getenv("MANYFOLD_API_URL")
-    token = os.getenv("MANYFOLD_API_TOKEN")
+    if not api_url:
+        print("Error: MANYFOLD_API_URL environment variable required.")
+        return
+    client = ManyfoldClient(
+        api_url,
+        token=os.getenv("MANYFOLD_API_TOKEN"),
+        client_id=os.getenv("MANYFOLD_CLIENT_ID"),
+        client_secret=os.getenv("MANYFOLD_CLIENT_SECRET"),
+    )
 
-    if not api_url or not token:
-        print("Error: MANYFOLD_API_URL and MANYFOLD_API_TOKEN environment variables required.")
+    if check:
+        caps = client.capabilities()
+        print("Manyfold API capabilities:")
+        for k, v in caps.items():
+            print(f"  {k}: {v if v is not None else 'unknown (no OpenAPI spec found)'}")
         return
 
-    headers = {"Authorization": f"Bearer {token}"}
+    library = Path(library_path or os.getenv("MANYFOLD_LIBRARY_PATH") or "") if (
+        library_path or os.getenv("MANYFOLD_LIBRARY_PATH")
+    ) else None
 
-    with open(csv_path) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            name = row["filename"]
-            tags = row["tags"]
-            if model_exists(api_url, headers, name):
-                print(f"Skipping {name}, already exists.")
-                continue
-            # TODO: Implement actual upload - POST model file, then PATCH to add tags
-            print(f"[DRY RUN] Would upload {name} with tags: {tags}")
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    print(f"Loaded {len(rows)} rows from {csv_path}; fetching Manyfold state...")
+    models = client.list_models()
+    models_by_slug: dict[str, dict] = {}
+    for m in models:
+        name = m.get("name") or m.get("title") or ""
+        if name:
+            models_by_slug[normalize_name(name)] = m
+    collections = {_collection_name(c).lower(): c for c in client.list_collections()}
+    print(f"Manyfold has {len(models)} models, {len(collections)} collections")
+
+    def ensure_collection(name: str) -> dict | None:
+        key = name.lower()
+        if key in collections:
+            return collections[key]
+        if dry_run:
+            collections[key] = {"name": name, "_planned": True}
+            return collections[key]
+        created = client.create_collection(name)
+        collections[key] = created
+        return created
+
+    stats = {"tagged": 0, "unchanged": 0, "staged": 0, "missing_source": 0, "errors": 0}
+    actions = 0
+    staged_any = False
+
+    for row in tqdm(rows, desc="Syncing"):
+        if limit is not None and actions >= limit:
+            break
+        filename = row.get("filename", "")
+        if not filename:
+            continue
+        tags = build_tags(row)
+        try:
+            model = match_model(filename, models_by_slug)
+            if model is not None:
+                merged = merge_tags(model_tags(model), tags)
+                attributes: dict = {}
+                if sorted(merged) != sorted(model_tags(model)):
+                    attributes["tag_list"] = merged
+                faction = (row.get("faction") or "").strip()
+                if faction and not model.get("collection") and not model.get("collection_id"):
+                    coll = ensure_collection(faction)
+                    cid = (coll or {}).get("id")
+                    if cid is not None:
+                        attributes["collection_id"] = cid
+                if not attributes:
+                    stats["unchanged"] += 1
+                    continue
+                actions += 1
+                if dry_run:
+                    print(f"[DRY RUN] would update {filename}: {sorted(attributes)}")
+                else:
+                    client.update_model(model, attributes)
+                stats["tagged"] += 1
+            else:
+                if library is None:
+                    print(f"Skipping {filename} — not in Manyfold and no --library-path to stage into")
+                    stats["missing_source"] += 1
+                    continue
+                source = Path(zips_dir) / filename if zips_dir else None
+                if source is None or not source.exists():
+                    print(f"Skipping {filename} — source file not found (need --zips)")
+                    stats["missing_source"] += 1
+                    continue
+                actions += 1
+                if dry_run:
+                    print(f"[DRY RUN] would stage {filename} into {library} with {len(tags)} tags")
+                else:
+                    stage_into_library(source, library, tags)
+                    staged_any = True
+                stats["staged"] += 1
+        except Exception as e:
+            # One bad archive or API hiccup must not kill a thousands-row sync
+            print(f"Error syncing {filename}: {e}")
+            stats["errors"] += 1
+
+    if staged_any and not dry_run:
+        if client.trigger_scan():
+            print("Library scan triggered. Re-run upload after it completes to apply collections to new models.")
+        else:
+            print("No scan endpoint available — trigger a library scan in the Manyfold UI, then re-run upload.")
+
+    print(
+        f"Done: {stats['tagged']} updated, {stats['unchanged']} unchanged, "
+        f"{stats['staged']} staged for scan, {stats['missing_source']} missing source, "
+        f"{stats['errors']} errors" + (" [dry run]" if dry_run else "")
+    )

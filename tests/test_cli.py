@@ -54,7 +54,11 @@ def test_tag_uses_preset_defaults(monkeypatch):
 
 def test_upload_uses_preset_default_csv(monkeypatch):
     calls = _run(monkeypatch, ["upload"])
-    assert calls == [("run_upload", ("tags-warhammer.csv",), {})]
+    name, args, kwargs = calls[0]
+    assert name == "run_upload"
+    assert args == ("tags-warhammer.csv",)
+    assert kwargs["dry_run"] is False
+    assert kwargs["check"] is False
 
 
 def test_all_runs_pipeline_in_order(monkeypatch):

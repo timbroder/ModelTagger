@@ -1,5 +1,8 @@
 import os
 import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
 from bs4 import BeautifulSoup
 
 sys.path.append('src')
@@ -121,6 +124,154 @@ def test_load_progress_empty_dir():
     results, visited = load_progress("/nonexistent/path/for/test")
     assert results == []
     assert visited == set()
+
+
+@pytest.fixture(autouse=True)
+def _reset_scrape_state():
+    import scrape
+    scrape._retry_counts.clear()
+    scrape._snapshot_indexes.clear()
+    yield
+    scrape._retry_counts.clear()
+    scrape._snapshot_indexes.clear()
+
+
+def test_collapse_monthly():
+    from scrape import _collapse_monthly
+    ts = ["20250101120000", "20250115120000", "20250201120000", "20240301120000"]
+    # newest first, one per calendar month
+    assert _collapse_monthly(ts) == ["20250201120000", "20250115120000", "20240301120000"]
+    assert _collapse_monthly(ts, limit=2) == ["20250201120000", "20250115120000"]
+
+
+def _cdx_resp(rows):
+    r = MagicMock()
+    r.ok = True
+    r.json.return_value = rows
+    return r
+
+
+def test_fetch_domain_snapshots_paginates_with_resume_key():
+    import scrape
+    page1 = _cdx_resp([
+        ["original", "timestamp"],
+        ["https://wh40k.lexicanum.com/wiki/Phoenix", "20250101000000"],
+        ["https://wh40k.lexicanum.com/wiki/Phoenix", "20260201000000"],
+        [],
+        ["resume-key-1"],
+    ])
+    page2 = _cdx_resp([
+        ["original", "timestamp"],
+        ["https://wh40k.lexicanum.com/wiki/Asurmen", "20251515000000"],
+    ])
+    with patch("scrape._wayback_get", side_effect=[page1, page2]) as mock_get:
+        index = scrape._fetch_domain_snapshots("wh40k.lexicanum.com")
+
+    assert index["/wiki/Phoenix"] == ["20260201000000", "20250101000000"]
+    assert index["/wiki/Asurmen"] == ["20251515000000"]
+    assert mock_get.call_args_list[1].kwargs["params"]["resumeKey"] == "resume-key-1"
+
+
+def test_ensure_snapshot_index_uses_cache(tmp_path):
+    import json
+    import scrape
+    cache = tmp_path / "_snapshots_wh40k-lexicanum-com.json"
+    cache.write_text(json.dumps({"/wiki/Phoenix": ["20260201000000"]}))
+    with patch("scrape._fetch_domain_snapshots") as mock_fetch:
+        scrape._ensure_snapshot_index("wh40k.lexicanum.com", str(tmp_path))
+    mock_fetch.assert_not_called()
+    assert scrape._snapshot_indexes["wh40k.lexicanum.com"]["/wiki/Phoenix"] == ["20260201000000"]
+
+
+def test_fetch_wayback_cdx_with_index_no_snapshots_is_permanent_skip():
+    import scrape
+    scrape._snapshot_indexes["wh40k.lexicanum.com"] = {}
+    assert scrape._fetch_wayback_cdx("https://wh40k.lexicanum.com/wiki/Nonexistent") is None
+
+
+def test_fetch_wayback_cdx_with_index_fetches_snapshot():
+    import scrape
+    scrape._snapshot_indexes["wh40k.lexicanum.com"] = {"/wiki/Phoenix": ["20260201000000"]}
+    ok_resp = MagicMock(ok=True)
+    parsed = {"title": "Phoenix", "text": {"*": "<p>lore</p>"}}
+    with patch("scrape._wayback_get", return_value=ok_resp) as mock_get, \
+            patch("scrape._fetch_html", return_value=parsed):
+        result = scrape._fetch_wayback_cdx("https://wh40k.lexicanum.com/wiki/Phoenix")
+    assert result == parsed
+    assert "20260201000000" in mock_get.call_args.args[0]
+
+
+def test_fetch_wayback_cdx_all_network_failures_is_transient():
+    import scrape
+    from scrape import TransientScrapeError
+    scrape._snapshot_indexes["wh40k.lexicanum.com"] = {
+        "/wiki/Phoenix": ["20260201000000", "20250101000000"],
+    }
+    with patch("scrape._wayback_get", return_value=None):
+        with pytest.raises(TransientScrapeError):
+            scrape._fetch_wayback_cdx("https://wh40k.lexicanum.com/wiki/Phoenix")
+
+
+def test_scrape_url_requeues_on_transient_failure():
+    import scrape
+    from scrape import scrape_url, TransientScrapeError
+    url = "https://wh40k.lexicanum.com/wiki/Phoenix"
+    visited: set = set()
+    results: list = []
+
+    with patch("scrape._fetch_wayback_cdx", side_effect=TransientScrapeError("boom")):
+        out = scrape_url((url, 0, 2, visited, results))
+
+    assert out == [(url, 0)]
+    assert url not in visited  # eligible for the requeued attempt
+
+    # After exhausting retries, the page is abandoned for this run
+    scrape._retry_counts[url] = 3
+    with patch("scrape._fetch_wayback_cdx", side_effect=TransientScrapeError("boom")):
+        out = scrape_url((url, 0, 2, visited, results))
+    assert out == []
+    assert results == []
+
+
+def test_scrape_url_filters_namespace_links():
+    from scrape import scrape_url
+    parsed = {
+        "title": "Phoenix",
+        "categories": [],
+        "sections": [],
+        "links": [
+            {"ns": 0, "*": "Asurmen"},
+            {"ns": 0, "*": "File:Phoenix.jpg"},
+            {"ns": 0, "*": "Category:Aeldari"},
+        ],
+        "text": {"*": "<p>lore</p>"},
+    }
+    visited: set = set()
+    results: list = []
+    with patch("scrape._fetch_api", return_value=parsed):
+        links = scrape_url(("https://example.com/wiki/Phoenix", 0, 2, visited, results))
+    assert [u for u, _ in links] == ["https://example.com/wiki/Asurmen"]
+
+
+def test_run_scraping_filters_namespace_seeds(tmp_path, monkeypatch):
+    import scrape
+    seeds = tmp_path / "seeds.txt"
+    seeds.write_text(
+        "https://example.com/wiki/Phoenix\n"
+        "https://example.com/wiki/File:Phoenix.jpg\n"
+        "https://example.com/wiki/Category:Aeldari\n"
+    )
+    out = str(tmp_path / "lore")
+    scraped = []
+
+    def fake_fetch_api(api_base, page):
+        scraped.append(page)
+        return {"title": page, "categories": [], "sections": [], "links": [],
+                "text": {"*": "<p>lore</p>"}}
+
+    monkeypatch.setattr(scrape, "_fetch_api", fake_fetch_api)
+    scrape.run_scraping(str(seeds), out, max_pages=10, max_depth=0, max_threads=2)
+    assert scraped == ["Phoenix"]
 
 
 def test_run_scraping_crawls_and_saves(tmp_path, monkeypatch):

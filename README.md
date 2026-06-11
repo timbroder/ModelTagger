@@ -86,11 +86,20 @@ Worth knowing for long scrapes:
   raw HTML, then the most recent Wayback Machine snapshot. Login walls and
   Cloudflare challenges are detected and rejected.
 - **Lexicanum goes through Wayback.** `wh40k.lexicanum.com` is hardcoded to
-  skip the live site (login wall) and search Wayback's CDX API for a usable
-  snapshot, newest first.
+  skip the live site (Cloudflare-walled) and use Wayback snapshots, newest
+  first. The snapshot list for the whole domain is bulk-fetched from the CDX
+  API once at startup and cached as `_snapshots_<domain>.json` in the output
+  dir (delete to refresh), so each page costs exactly one snapshot fetch —
+  no per-page CDX queries.
+- **Transient failures requeue.** A network-level failure puts the page back
+  in the queue (up to 3 tries per run) instead of skipping it; only "no
+  snapshot exists" is a permanent skip. Skipped pages are never written to
+  `_visited.txt`, so a later resume retries them too.
 - **Rate limiting.** Wayback requests are globally limited to ~1/sec with
-  shared exponential backoff on 429/503; live sites get a 1 req/sec per-domain
-  politeness delay. Expect roughly one page per second — plan accordingly.
+  shared, jittered exponential backoff on 429/503; live sites get a 1 req/sec
+  per-domain politeness delay. Expect roughly one page per second.
+- Non-article namespace URLs (`File:`, `Category:`, ...) are skipped at
+  scrape time — both in seeds and discovered links.
 - The crawler follows same-domain `/wiki/` links up to `--max-depth` and stops
   at `--max-pages` total pages.
 
@@ -203,14 +212,44 @@ the prompt (works in OpenAI mode too).
 ### 4. Upload to Manyfold
 
 ```bash
-python src/main.py upload --mode warhammer   # or --csv path/to/tags.csv
+# verify what your instance's API supports first
+python src/main.py upload --check
+
+# preview the sync without writing anything
+python src/main.py upload --mode warhammer --zips data/zips \
+    --library-path /path/to/manyfold/library --dry-run
+
+# then for real
+python src/main.py upload --mode warhammer --zips data/zips \
+    --library-path /path/to/manyfold/library
 ```
 
-Set `MANYFOLD_API_URL` and `MANYFOLD_API_TOKEN` in your environment.
+Environment: `MANYFOLD_API_URL` plus either `MANYFOLD_API_TOKEN` or
+`MANYFOLD_CLIENT_ID`/`MANYFOLD_CLIENT_SECRET` (OAuth client credentials).
+`MANYFOLD_LIBRARY_PATH` can replace `--library-path`.
 
-> ⚠️ **Dry run only.** This step currently checks whether each model already
-> exists in Manyfold and prints what it *would* upload. The actual file
-> upload / tag POST is not implemented yet.
+How the sync works:
+
+- **Models already in Manyfold** (matched by normalized name, with a
+  conservative fuzzy fallback) get their tags updated with namespaced tags
+  from the CSV (`faction: Adepta Sororitas`, `unit: Sister Superior`, ...).
+  The pipeline only ever replaces tags in namespaces it owns — anything you
+  added by hand in the Manyfold UI survives re-runs. Models also get
+  assigned to a collection named after their faction (created on demand)
+  unless you already put them in one.
+- **Models not in Manyfold yet** are staged into the library folder:
+  archives are unpacked into a folder per model with a `datapackage.json`
+  carrying the tags (Manyfold imports it at scan time), then a library scan
+  is triggered via the API (or you're told to trigger one in the UI).
+  Re-run `upload` after the scan completes to apply collections to the
+  newly scanned models.
+- Built for large libraries: rate-limited, retrying, resumable (`--limit`
+  for incremental runs, re-staging and re-tagging are no-ops when nothing
+  changed), and `--dry-run` reports the full plan without writing.
+
+> Note: Manyfold's HTTP API doesn't support file uploads (as of v0.118), so
+> staging requires filesystem access to the library folder. `--check` probes
+> your instance's OpenAPI spec to confirm what it supports.
 
 ---
 

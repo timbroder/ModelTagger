@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import random
 import re
 import time
 import threading
@@ -13,7 +15,11 @@ from datetime import datetime, timezone
 from tqdm import tqdm
 from markdownify import markdownify as md_convert
 
-from utils import slugify
+from utils import slugify, is_article_url
+
+
+class TransientScrapeError(Exception):
+    """A network-level failure that should requeue the page, not skip it."""
 
 _HEADERS = {
     "User-Agent": "ModelTagger/1.0 (wiki scraper; contact via github.com/timbroder/ModelTagger)"
@@ -32,6 +38,13 @@ _WAYBACK_MIN_INTERVAL = 1.1  # seconds
 # Guards the shared visited set and results list across scraper threads
 _visited_lock = threading.Lock()
 _results_lock = threading.Lock()
+
+# Transient-failure requeue accounting: a page is retried at most this many
+# times before being abandoned for this run (it still isn't written to
+# _visited.txt, so a future resume retries it again)
+_MAX_TRANSIENT_RETRIES = 3
+_retry_lock = threading.Lock()
+_retry_counts: dict[str, int] = {}
 
 # Per-domain politeness limiter for live (non-Wayback) sites — enforces a
 # minimum gap between any two requests to the same domain across all threads
@@ -83,6 +96,9 @@ def _wayback_get(
         with _wayback_lock:
             wait = _wayback_pause_until - time.time()
         if wait > 0:
+            # Jitter the wakeup so threads don't re-fire in lockstep after a
+            # shared pause and immediately trigger the next 503 round
+            wait += random.uniform(0, 5)
             print(f"  [Wayback] rate limited — pausing {wait:.0f}s")
             time.sleep(wait)
         try:
@@ -93,7 +109,7 @@ def _wayback_get(
                 print(f"  [Wayback] {resp.status_code} rate limited — backing off {delay}s ({delay//60}min)")
                 with _wayback_lock:
                     _wayback_pause_until = max(_wayback_pause_until, time.time() + delay)
-                time.sleep(delay)
+                time.sleep(delay + random.uniform(0, 0.25 * delay))
                 continue
             return resp
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
@@ -293,58 +309,160 @@ def _fetch_wayback(url: str) -> dict | None:
         return None
 
 
-def _fetch_wayback_cdx(url: str) -> dict | None:
-    """Use the Wayback CDX API to find a usable snapshot and fetch it.
+# Bulk-prefetched Wayback snapshot indexes, keyed by domain. Each maps an
+# unquoted /wiki/Page path to its snapshot timestamps (newest-first, one per
+# calendar month). Built once per run and cached to disk, this removes the
+# flaky per-URL CDX query from the hot path entirely: scraping a page costs
+# exactly one snapshot fetch.
+_snapshot_indexes: dict[str, dict[str, list[str]]] = {}
 
-    Fetches one representative snapshot per calendar month (collapse=timestamp:6),
-    sorted newest-first, up to 72 months (~6 years). Stops as soon as a
-    non-login-wall snapshot is found. _is_login_wall() in _fetch_html rejects
-    login-wall pages automatically. All Wayback requests go through _wayback_get
-    so 429s and connection refusals trigger shared exponential backoff.
+_SNAPSHOT_MONTHS = 72  # how many monthly snapshots to keep per page (~6 years)
+_CDX_PAGE_LIMIT = 50000  # rows per bulk CDX request (resume-key pagination)
+
+
+def _snapshot_key(url: str) -> str:
+    return unquote(urlparse(url).path)
+
+
+def _collapse_monthly(timestamps: list[str], limit: int = _SNAPSHOT_MONTHS) -> list[str]:
+    """Newest-first, at most one timestamp per calendar month."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for ts in sorted(timestamps, reverse=True):
+        if ts[:6] in seen:
+            continue
+        seen.add(ts[:6])
+        out.append(ts)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _fetch_domain_snapshots(domain: str) -> dict[str, list[str]]:
+    """Bulk-fetch the CDX snapshot index for a whole domain.
+
+    Uses prefix matching with resume-key pagination, so the entire domain's
+    snapshot list (200s since 2019) arrives in a handful of large requests
+    instead of one flaky CDX query per page.
     """
-    try:
-        cdx_resp = _wayback_get(
+    print(f"[Snapshot index] bulk-fetching CDX index for {domain} (one-time)...")
+    raw: dict[str, list[str]] = {}
+    resume_key: str | None = None
+    while True:
+        params = {
+            "url": f"{domain}/wiki/",
+            "matchType": "prefix",
+            "output": "json",
+            "fl": "original,timestamp",
+            "filter": "statuscode:200",
+            "from": "20190101",
+            "limit": str(_CDX_PAGE_LIMIT),
+            "showResumeKey": "true",
+        }
+        if resume_key:
+            params["resumeKey"] = resume_key
+        resp = _wayback_get(
             "http://web.archive.org/cdx/search/cdx",
-            timeout=10,
-            max_retries=2,
+            timeout=120,
+            max_retries=6,
             shared_backoff_on_error=True,
-            params={
-                "url": url,
-                "output": "json",
-                "fl": "timestamp",
-                "filter": "statuscode:200",
-                "from": "20190101",
-                "collapse": "timestamp:6",
-                "limit": 72,
-                "sort": "reverse",
-            },
+            params=params,
         )
-        if cdx_resp is None or not cdx_resp.ok:
-            return None
-        rows = cdx_resp.json()
-        n = len(rows) - 1  # subtract header row
-        if n <= 0:
-            print(f"  [Wayback CDX] no snapshots found for {url}")
-            return None
-        print(f"  [Wayback CDX] {n} snapshots to try for {url}")
-        for row in rows[1:]:  # skip header row
-            wayback_url = f"https://web.archive.org/web/{row[0]}/{url}"
-            page_resp = _wayback_get(wayback_url)
-            if page_resp is None:
-                print(f"  [Wayback CDX] {row[0]}: _wayback_get returned None")
+        if resp is None or not resp.ok:
+            raise TransientScrapeError(f"CDX bulk index fetch failed for {domain}")
+        rows = resp.json()
+        resume_key = None
+        if len(rows) >= 2 and rows[-2] == []:
+            resume_key = rows[-1][0]
+            rows = rows[:-2]
+        for row in rows:
+            if len(row) != 2 or row == ["original", "timestamp"]:
                 continue
-            if not page_resp.ok:
-                print(f"  [Wayback CDX] {row[0]}: HTTP {page_resp.status_code}, skipping")
-                continue
-            result = _fetch_html(wayback_url, resp=page_resp)
-            if result and result.get("text", {}).get("*", "").strip():
-                print(f"  [Wayback CDX] {row[0]}: found usable content")
-                return result
-            print(f"  [Wayback CDX] {row[0]}: login wall or empty content")
+            raw.setdefault(_snapshot_key(row[0]), []).append(row[1])
+        print(f"  [Snapshot index] {sum(len(v) for v in raw)} snapshots across {len(raw)} pages so far")
+        if not resume_key:
+            break
+    return {k: _collapse_monthly(v) for k, v in raw.items()}
+
+
+def _ensure_snapshot_index(domain: str, output_dir: str) -> None:
+    """Load the domain snapshot index from cache, fetching it if missing."""
+    if domain in _snapshot_indexes:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    cache_path = os.path.join(output_dir, f"_snapshots_{slugify(domain)}.json")
+    if os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
+            _snapshot_indexes[domain] = json.load(f)
+        print(f"[Snapshot index] loaded {len(_snapshot_indexes[domain])} pages from {cache_path}")
+        return
+    index = _fetch_domain_snapshots(domain)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(index, f)
+    _snapshot_indexes[domain] = index
+    print(f"[Snapshot index] cached {len(index)} pages to {cache_path} (delete to refresh)")
+
+
+def _fetch_snapshots(url: str, timestamps: list[str]) -> dict | None:
+    """Fetch snapshots newest-first until one has usable (non-login-wall)
+    content. Raises TransientScrapeError when every attempt failed at the
+    network level — that page should be retried, not skipped."""
+    network_failures = 0
+    for ts in timestamps:
+        wayback_url = f"https://web.archive.org/web/{ts}/{url}"
+        page_resp = _wayback_get(wayback_url)
+        if page_resp is None:
+            network_failures += 1
+            continue
+        if not page_resp.ok:
+            continue
+        result = _fetch_html(wayback_url, resp=page_resp)
+        if result and result.get("text", {}).get("*", "").strip():
+            return result
+    if network_failures == len(timestamps) and timestamps:
+        raise TransientScrapeError(f"all {len(timestamps)} snapshot fetches failed for {url}")
+    return None
+
+
+def _fetch_wayback_cdx(url: str) -> dict | None:
+    """Find and fetch a usable Wayback snapshot for a wayback-only page.
+
+    Prefers the bulk-prefetched snapshot index (no per-URL CDX query). Falls
+    back to a per-URL CDX lookup only if the index is unavailable. Raises
+    TransientScrapeError on network-level failure so the caller requeues.
+    """
+    index = _snapshot_indexes.get(urlparse(url).netloc)
+    if index is not None:
+        timestamps = index.get(_snapshot_key(url))
+        if not timestamps:
+            print(f"  [Snapshot index] no snapshots recorded for {url}")
+            return None
+        return _fetch_snapshots(url, timestamps)
+
+    # Legacy fallback: per-URL CDX query
+    cdx_resp = _wayback_get(
+        "http://web.archive.org/cdx/search/cdx",
+        timeout=30,
+        max_retries=3,
+        shared_backoff_on_error=True,
+        params={
+            "url": url,
+            "output": "json",
+            "fl": "timestamp",
+            "filter": "statuscode:200",
+            "from": "20190101",
+            "collapse": "timestamp:6",
+            "limit": _SNAPSHOT_MONTHS,
+            "sort": "reverse",
+        },
+    )
+    if cdx_resp is None or not cdx_resp.ok:
+        raise TransientScrapeError(f"CDX query failed for {url}")
+    rows = cdx_resp.json()
+    if len(rows) <= 1:  # header row only
+        print(f"  [Wayback CDX] no snapshots found for {url}")
         return None
-    except Exception as e:
-        print(f"  [Wayback CDX] exception: {e}")
-        return None
+    return _fetch_snapshots(url, [row[0] for row in rows[1:]])
 
 
 def _parse_infobox(soup: BeautifulSoup) -> dict[str, str]:
@@ -412,7 +530,19 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
     try:
         page = _page_title_from_url(url)
         if domain in _WAYBACK_ONLY_DOMAINS:
-            parsed = _fetch_wayback_cdx(url)
+            try:
+                parsed = _fetch_wayback_cdx(url)
+            except TransientScrapeError as e:
+                with _retry_lock:
+                    _retry_counts[url] = _retry_counts.get(url, 0) + 1
+                    count = _retry_counts[url]
+                if count <= _MAX_TRANSIENT_RETRIES:
+                    print(f"  Requeueing {url} after transient failure ({count}/{_MAX_TRANSIENT_RETRIES}): {e}")
+                    with _visited_lock:
+                        visited.discard(url)
+                    return [(url, depth)]
+                print(f"  Giving up on {url} after {_MAX_TRANSIENT_RETRIES} requeues (will retry on next resume)")
+                return []
             if parsed:
                 print(f"  Using Wayback CDX snapshot for {url}")
             else:
@@ -470,7 +600,7 @@ def scrape_url(args: tuple) -> list[tuple[str, int]] | None:
                 if link.get("ns", -1) != 0:
                     continue
                 linked_url = _page_url(url, link["*"])
-                if urlparse(linked_url).netloc == domain:
+                if urlparse(linked_url).netloc == domain and is_article_url(linked_url):
                     new_links.append((linked_url, depth + 1))
 
     except Exception as e:
@@ -550,6 +680,16 @@ def run_scraping(
     """Scrape lore pages from wiki seeds via MediaWiki API and save as markdown files."""
     with open(seed_file) as f:
         seeds = [line.strip() for line in f if line.strip()]
+
+    articles = [u for u in seeds if is_article_url(u)]
+    if len(articles) < len(seeds):
+        print(f"Skipping {len(seeds) - len(articles)} non-article namespace URLs (File:, Category:, ...)")
+    seeds = articles
+
+    # Bulk-prefetch Wayback snapshot indexes for wayback-only domains so the
+    # crawl loop never issues per-URL CDX queries
+    for domain in {urlparse(u).netloc for u in seeds} & _WAYBACK_ONLY_DOMAINS:
+        _ensure_snapshot_index(domain, output_dir)
 
     results, visited = load_progress(output_dir)
     queue = [(url, 0) for url in seeds if url not in visited]

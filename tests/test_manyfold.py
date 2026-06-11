@@ -1,0 +1,281 @@
+import json
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+sys.path.append('src')
+
+from manyfold import ManyfoldClient, model_tags, _items, _next_link
+from manyfold_ingest import (
+    build_tags,
+    merge_tags,
+    normalize_name,
+    match_model,
+    stage_into_library,
+    run_upload,
+)
+
+
+# --- pure helpers ---------------------------------------------------------
+
+def test_build_tags_namespaces_fields_and_splits_lists():
+    row = {
+        "filename": "x.zip",
+        "faction": "Space Marines",
+        "subfaction": "Wolfspear",
+        "unit": "Techmarine",
+        "model_type": "",
+        "role": "Elites",
+        "allegiance": "Imperium",
+        "equipment": "Servo-arm, Power Armour",
+        "tags": "Primaris, Adeptus Mechanicus",
+    }
+    assert build_tags(row) == [
+        "faction: Space Marines",
+        "subfaction: Wolfspear",
+        "unit: Techmarine",
+        "role: Elites",
+        "allegiance: Imperium",
+        "equipment: Servo-arm",
+        "equipment: Power Armour",
+        "Primaris",
+        "Adeptus Mechanicus",
+    ]
+
+
+def test_merge_tags_updates_owned_keeps_manual():
+    existing = [
+        "faction: Orks",            # owned, stale -> replaced
+        "painted",                  # manual -> kept
+        "scale: 32mm",              # not an owned namespace -> kept
+        "Primaris",                 # plain, also in new -> no duplicate
+    ]
+    new = ["faction: Space Marines", "unit: Techmarine", "Primaris"]
+    assert merge_tags(existing, new) == [
+        "painted", "scale: 32mm", "Primaris",
+        "faction: Space Marines", "unit: Techmarine",
+    ]
+
+
+def test_normalize_and_match():
+    models = {
+        normalize_name("Wolfspear Techmarine"): {"id": 1, "name": "Wolfspear Techmarine"},
+        normalize_name("Ork Warboss"): {"id": 2, "name": "Ork Warboss"},
+    }
+    assert match_model("Wolfspear+Techmarine.zip", models)["id"] == 1
+    assert match_model("wolfspear_techmarine.stl", models)["id"] == 1
+    # Near-match within ratio
+    assert match_model("Wolfspear Techmarines.zip", models)["id"] == 1
+    # Clearly different name must NOT match
+    assert match_model("Sister Superior.zip", models) is None
+
+
+def test_model_tags_shapes():
+    assert model_tags({"tags": ["a", "b"]}) == ["a", "b"]
+    assert model_tags({"tags": [{"name": "a"}, {"name": "b"}]}) == ["a", "b"]
+    assert model_tags({"tag_list": ["x"]}) == ["x"]
+    assert model_tags({}) == []
+
+
+def test_pagination_helpers():
+    assert _items({"member": [1, 2]}) == [1, 2]
+    assert _items({"@graph": [1]}) == [1]
+    assert _items([3]) == [3]
+    assert _next_link({"view": {"next": "/models?page=2"}}) == "/models?page=2"
+    assert _next_link({"next": "/models?page=3"}) == "/models?page=3"
+    assert _next_link({}) is None
+
+
+# --- client ---------------------------------------------------------------
+
+def _resp(status=200, body=None):
+    r = MagicMock()
+    r.status_code = status
+    r.ok = 200 <= status < 300
+    r.json.return_value = body if body is not None else {}
+    r.text = json.dumps(body or {})
+    return r
+
+
+def test_client_paginates_and_authenticates():
+    client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
+    pages = [
+        _resp(200, {"member": [{"id": 1}], "next": "/models?page=2"}),
+        _resp(200, {"member": [{"id": 2}]}),
+    ]
+    with patch("manyfold.requests.request", side_effect=pages) as mock_req:
+        models = client.list_models()
+    assert [m["id"] for m in models] == [1, 2]
+    headers = mock_req.call_args_list[0].kwargs["headers"]
+    assert headers["Authorization"] == "Bearer tok"
+
+
+def test_client_retries_on_429(monkeypatch):
+    monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
+    client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
+    with patch("manyfold.requests.request", side_effect=[_resp(429), _resp(200, {"member": []})]):
+        assert client.list_models() == []
+
+
+def test_client_update_model_falls_back_to_flat_payload(monkeypatch):
+    monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
+    client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
+    with patch("manyfold.requests.request", side_effect=[_resp(422), _resp(200)]) as mock_req:
+        client.update_model({"id": 5}, {"tag_list": ["a"]})
+    assert mock_req.call_args_list[0].kwargs["json"] == {"model": {"tag_list": ["a"]}}
+    assert mock_req.call_args_list[1].kwargs["json"] == {"tag_list": ["a"]}
+
+
+# --- staging --------------------------------------------------------------
+
+def test_stage_into_library_loose_file(tmp_path):
+    archive = tmp_path / "Wolfspear+Techmarine.stl"
+    archive.write_text("mesh")
+    library = tmp_path / "library"
+
+    dest = stage_into_library(archive, library, ["faction: Space Marines"])
+
+    assert dest == library / "Wolfspear Techmarine"
+    assert (dest / "Wolfspear+Techmarine.stl").exists()
+    pkg = json.loads((dest / "datapackage.json").read_text())
+    assert pkg["title"] == "Wolfspear Techmarine"
+    assert pkg["keywords"] == ["faction: Space Marines"]
+
+    # Re-staging is a no-op (resume)
+    assert stage_into_library(archive, library, []) == dest
+
+
+# --- run_upload flows -----------------------------------------------------
+
+def _write_csv(tmp_path, rows):
+    header = ["filename", "faction", "subfaction", "unit", "model_type",
+              "role", "allegiance", "equipment", "tags"]
+    path = tmp_path / "tags.csv"
+    lines = [",".join(header)]
+    for r in rows:
+        lines.append(",".join(r.get(h, "") for h in header))
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _fake_client(models=None, collections=None):
+    client = MagicMock()
+    client.list_models.return_value = models or []
+    client.list_collections.return_value = collections or []
+    client.create_collection.side_effect = lambda name: {"id": 99, "name": name}
+    client.trigger_scan.return_value = True
+    return client
+
+
+def test_run_upload_updates_existing_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    monkeypatch.delenv("MANYFOLD_LIBRARY_PATH", raising=False)
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "Wolfspear+Techmarine.zip", "faction": "Space Marines", "unit": "Techmarine"},
+    ])
+    model = {"id": 1, "name": "Wolfspear Techmarine", "tags": ["painted"]}
+    client = _fake_client(models=[model])
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path))
+
+    attributes = client.update_model.call_args.args[1]
+    assert "painted" in attributes["tag_list"]
+    assert "faction: Space Marines" in attributes["tag_list"]
+    assert attributes["collection_id"] == 99
+    client.create_collection.assert_called_once_with("Space Marines")
+
+
+def test_run_upload_respects_existing_collection_assignment(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "Wolfspear+Techmarine.zip", "faction": "Space Marines"},
+    ])
+    model = {"id": 1, "name": "Wolfspear Techmarine", "tags": [], "collection_id": 7}
+    client = _fake_client(models=[model])
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path))
+
+    attributes = client.update_model.call_args.args[1]
+    assert "collection_id" not in attributes
+
+
+def test_run_upload_stages_missing_models_and_scans(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "Sister Superior.stl").write_text("mesh")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "Sister Superior.stl", "faction": "Adepta Sororitas"},
+    ])
+    client = _fake_client()
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library))
+
+    assert (library / "Sister Superior" / "datapackage.json").exists()
+    client.trigger_scan.assert_called_once()
+    client.update_model.assert_not_called()
+
+
+def test_run_upload_dry_run_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "Sister Superior.stl").write_text("mesh")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "Wolfspear+Techmarine.zip", "faction": "Space Marines"},
+        {"filename": "Sister Superior.stl", "faction": "Adepta Sororitas"},
+    ])
+    model = {"id": 1, "name": "Wolfspear Techmarine", "tags": []}
+    client = _fake_client(models=[model])
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library), dry_run=True)
+
+    client.update_model.assert_not_called()
+    client.create_collection.assert_not_called()
+    client.trigger_scan.assert_not_called()
+    assert not library.exists()
+
+
+def test_run_upload_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "A.zip", "faction": "Orks"},
+        {"filename": "B.zip", "faction": "Orks"},
+    ])
+    models = [
+        {"id": 1, "name": "A", "tags": []},
+        {"id": 2, "name": "B", "tags": []},
+    ]
+    client = _fake_client(models=models)
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), limit=1)
+
+    assert client.update_model.call_count == 1
+
+
+def test_run_upload_check_probes_capabilities(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    client = _fake_client()
+    client.capabilities.return_value = {"spec_found": True, "model_update": True}
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(tmp_path / "nonexistent.csv"), check=True)
+
+    out = capsys.readouterr().out
+    assert "model_update: True" in out
+    client.list_models.assert_not_called()
