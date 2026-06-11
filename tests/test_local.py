@@ -232,7 +232,7 @@ def test_main_wires_prompt_override(monkeypatch):
 
     monkeypatch.setattr(main, "run_tagging", fake_run_tagging)
     monkeypatch.setattr(sys, "argv", [
-        "main.py", "--step", "tag", "--zips", "z", "--tag-output", "t.csv",
+        "main.py", "tag", "--zips", "z", "--tag-output", "t.csv",
         "--prompt-override", "custom prompt",
     ])
     main.main()
