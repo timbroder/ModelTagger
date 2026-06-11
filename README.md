@@ -52,15 +52,30 @@ default, or a SentenceTransformer with `--use-local`).
 
 ## ⚙️ Usage
 
+Every command takes `--mode warhammer|dnd` (default `warhammer`), which
+supplies the default seeds file, lore directory, vector DB path, tag CSV, and
+prompt from `config/tagging_presets.json`. Any of those can be overridden
+with flags. Run `python src/main.py <command> --help` to see each command's
+options.
+
+Run the whole pipeline in one go:
+
+```bash
+python src/main.py all --mode warhammer --zips data/zips --max-pages 1000
+```
+
+Or step by step:
+
 ### 1. Scrape Lore
 
 ```bash
-python src/main.py --step scrape --seeds seeds/warhammer_seeds.txt --output lore/warhammer \
-    --max-pages 1000 --max-depth 2
+python src/main.py scrape --mode warhammer --max-pages 1000 --max-depth 2
 ```
 
 Writes one markdown file per page (YAML frontmatter with title, URL,
-categories, headings, and parsed infobox) into the output directory.
+categories, headings, and parsed infobox) into `--lore-dir` (default:
+the preset's `lore_dir`, e.g. `lore/warhammer`). `--seeds` overrides the
+preset's seeds file.
 
 Worth knowing for long scrapes:
 
@@ -89,11 +104,12 @@ tools/scrape_sitemap.sh   # every page on wh40k.lexicanum.com (sitemap)
 ### 2. Embed Lore into Vector DB
 
 ```bash
-python src/main.py --step embed --output lore/warhammer --vector-db-path .chroma/warhammer
+python src/main.py embed --mode warhammer
 ```
 
-`--output` here is the scrape output: either the markdown directory, or a
-legacy `lore.json` from older versions. Text is chunked into 300–800-token
+Reads the scrape output (`--lore-dir`: either the markdown directory, or a
+legacy `lore.json` from older versions) and writes to `--vector-db-path`
+(default: the preset's `vector_db`). Text is chunked into 300–800-token
 windows on sentence boundaries with ~20% overlap, prefixed with the page
 title, and stored in a Chroma collection named `lore` (cosine distance).
 Re-running is safe — chunks are upserted by ID.
@@ -108,8 +124,7 @@ Re-running is safe — chunks are upserted by ID.
 ### 3. Tag Miniature Files
 
 ```bash
-python src/main.py --step tag --zips data/zips --tag-output tags.csv \
-    --vector-db-path .chroma/warhammer --mode warhammer --model gpt-4o
+python src/main.py tag --zips data/zips --mode warhammer --model gpt-4o
 ```
 
 For each archive/file: extracts it, validates the contents (must contain a
@@ -118,8 +133,9 @@ symbols out of the filenames, retrieves the most relevant lore chunks from
 Chroma (exact slug match → substring match → unfiltered, keeping whichever
 set matches closest), and asks the LLM for tags within `--token-budget`.
 
-- Results append to the `--tag-output` CSV (`filename, tags`); already-listed
-  files are skipped, so re-running resumes where it left off.
+- Results append to the `--tag-output` CSV (`filename, tags`; default the
+  preset's `tag_output`, e.g. `tags-warhammer.csv`); already-listed files are
+  skipped, so re-running resumes where it left off.
 - `--mode warhammer|dnd` selects a prompt preset from
   `config/tagging_presets.json`; `--prompt-override` replaces it entirely.
 - If generation fails, raw lore snippets are written as fallback tags and the
@@ -137,11 +153,10 @@ ollama serve
 ```
 
 ```bash
-python src/main.py --step embed --output lore/warhammer --vector-db-path .chroma/local \
+python src/main.py embed --vector-db-path .chroma/local \
     --use-local --embed-model BAAI/bge-m3
 
-python src/main.py --step tag --zips data/zips --tag-output tags.csv \
-    --vector-db-path .chroma/local --mode warhammer \
+python src/main.py tag --zips data/zips --vector-db-path .chroma/local \
     --use-local --local-model llama3.1:8b-instruct --rerank \
     --rerank-model BAAI/bge-reranker-base --token-budget 3000
 ```
@@ -153,7 +168,7 @@ the prompt (works in OpenAI mode too).
 ### 4. Upload to Manyfold
 
 ```bash
-python src/main.py --step upload --csv tags.csv
+python src/main.py upload --mode warhammer   # or --csv path/to/tags.csv
 ```
 
 Set `MANYFOLD_API_URL` and `MANYFOLD_API_TOKEN` in your environment.
