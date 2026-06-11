@@ -110,7 +110,7 @@ def test_local_generation(tmp_path, monkeypatch):
     assert urls[1].endswith("/api/generate")
 
     rows = list(csv.reader(open(out_csv)))
-    assert rows[1][1].replace(" ", "") == "tag1,tag2"
+    assert rows[1][-1].replace(" ", "") == "tag1,tag2"
 
 
 def test_rerank(tmp_path, monkeypatch):
@@ -218,7 +218,8 @@ def test_empty_vector_db_skips_gracefully(tmp_path, monkeypatch):
     # No LLM call should have been made and the file logged with empty tags
     assert not any(call.args[0].endswith("/api/generate") for call in mock_post.call_args_list)
     rows = list(csv.reader(open(out_csv)))
-    assert rows[1] == ["m.stl", ""]
+    assert rows[1][0] == "m.stl"
+    assert all(cell == "" for cell in rows[1][1:])
 
 
 def test_main_wires_prompt_override(monkeypatch):

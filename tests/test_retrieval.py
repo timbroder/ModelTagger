@@ -34,9 +34,9 @@ def test_select_context_docs_delta_and_floor():
     docs = ["a", "b", "c", "d", "e"]
     dists = [0.30, 0.32, 0.40, 0.60, 0.70]
     metas = [None] * 5
-    # a,b within delta of best; c,d admitted by the min_docs floor? No —
-    # floor is 3, so c is admitted (picked<3 when reached), d is past delta with 3 picked
-    assert select_context_docs(docs, dists, metas) == ["a", "b", "c"]
+    # a,b within delta of best; c admitted by the min_docs floor; d is past
+    # delta with 3 already picked
+    assert [d for d, _ in select_context_docs(docs, dists, metas)] == ["a", "b", "c"]
 
 
 def test_select_context_docs_per_page_cap():
@@ -48,7 +48,7 @@ def test_select_context_docs_per_page_cap():
         {"source": "p2"}, {"source": "p3"},
     ]
     # Third chunk from page p1 is skipped in favour of other pages
-    assert select_context_docs(docs, dists, metas) == ["p1c1", "p1c2", "p2c1", "p3c1"]
+    assert [d for d, _ in select_context_docs(docs, dists, metas)] == ["p1c1", "p1c2", "p2c1", "p3c1"]
 
 
 def test_select_context_docs_max_cap():
@@ -117,4 +117,4 @@ def test_run_tagging_falls_back_to_unfiltered(tmp_path):
     assert "where" not in calls[1].kwargs
     rows = list(csv.reader(open(out_csv)))
     assert rows[1][0] == "Wolfspear+Techmarine.stl"
-    assert rows[1][1] != ""
+    assert rows[1][-1] != ""

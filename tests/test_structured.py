@@ -1,0 +1,184 @@
+import csv
+import json
+import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+sys.path.append('src')
+
+WH_FIELDS = ["faction", "subfaction", "unit", "model_type", "role", "allegiance", "equipment"]
+
+
+@pytest.fixture(autouse=True)
+def _api_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+
+def test_parse_structured_valid_json():
+    from tagging import parse_structured
+    raw = json.dumps({
+        "faction": "Space Marines",
+        "subfaction": "Wolfspear",
+        "unit": "Techmarine",
+        "model_type": "Infantry",
+        "role": "Elites",
+        "allegiance": "Imperium",
+        "equipment": ["Servo-arm", "Power Armour"],
+        "tags": ["Primaris", "Adeptus Mechanicus"],
+    })
+    parsed = parse_structured(raw, WH_FIELDS)
+    assert parsed["faction"] == "Space Marines"
+    assert parsed["equipment"] == "Servo-arm, Power Armour"
+    assert parsed["tags"] == ["Primaris", "Adeptus Mechanicus"]
+
+
+def test_parse_structured_unknowns_become_empty():
+    from tagging import parse_structured
+    raw = '{"faction": "unknown", "unit": "Techmarine", "tags": []}'
+    parsed = parse_structured(raw, WH_FIELDS)
+    assert parsed["faction"] == ""
+    assert parsed["unit"] == "Techmarine"
+    assert parsed["role"] == ""
+
+
+def test_parse_structured_json_inside_prose():
+    from tagging import parse_structured
+    raw = 'Here you go:\n{"faction": "Orks", "tags": ["Waaagh"]}\nHope that helps!'
+    parsed = parse_structured(raw, WH_FIELDS)
+    assert parsed["faction"] == "Orks"
+    assert parsed["tags"] == ["Waaagh"]
+
+
+def test_parse_structured_falls_back_to_flat_tags():
+    from tagging import parse_structured
+    parsed = parse_structured("Orks, Nob, Choppa", WH_FIELDS)
+    assert parsed["faction"] == ""
+    assert parsed["tags"] == ["Orks", "Nob", "Choppa"]
+
+
+def test_related_pages_block():
+    from tagging import related_pages_block
+    metas = [
+        {"title": "Techmarine", "categories": "Space Marines, Troops (Space Marines)"},
+        {"title": "Techmarine", "categories": "Space Marines, Troops (Space Marines)"},
+        {"title": "Wolfspear", "categories": ""},
+        None,
+    ]
+    block = related_pages_block(metas)
+    assert block.startswith("Related wiki pages:\n")
+    assert block.count("Techmarine") == 1
+    assert "[Categories: Space Marines, Troops (Space Marines)]" in block
+    assert "- Wolfspear\n" in block
+    assert related_pages_block([None]) == ""
+
+
+def _run_tagging(tmp_path, query_return, response_text):
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "Wolfspear+Techmarine.stl").write_text("mesh")
+    out_csv = tmp_path / "tags.csv"
+
+    mock_col = MagicMock()
+    mock_col.query.return_value = query_return
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+
+    class DummyResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"response": response_text, "models": []}
+
+    mock_post = MagicMock(return_value=DummyResp())
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.requests.get", return_value=DummyResp()), \
+            patch("tagging.requests.post", mock_post), \
+            patch("tagging.count_tokens", side_effect=lambda text, model=None: len(text) // 4):
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(tmp_path / "db"), None, "warhammer", use_local=True)
+    prompt = mock_post.call_args[1]["json"]["prompt"]
+    return out_csv, prompt
+
+
+def test_structured_csv_columns(tmp_path):
+    response = json.dumps({
+        "faction": "Space Marines", "subfaction": "Wolfspear", "unit": "Techmarine",
+        "model_type": "Infantry", "role": "Elites", "allegiance": "Imperium",
+        "equipment": ["Servo-arm"], "tags": ["Primaris"],
+    })
+    out_csv, _ = _run_tagging(tmp_path, {
+        "documents": [["Techmarine - lore text"]],
+        "distances": [[0.3]],
+        "metadatas": [[{"source": "u", "title": "Techmarine", "categories": "Space Marines"}]],
+    }, response)
+
+    rows = list(csv.reader(open(out_csv)))
+    assert rows[0] == ["filename"] + WH_FIELDS + ["tags"]
+    row = dict(zip(rows[0], rows[1]))
+    assert row["faction"] == "Space Marines"
+    assert row["unit"] == "Techmarine"
+    assert row["allegiance"] == "Imperium"
+    assert row["tags"] == "Primaris"
+
+
+def test_prompt_includes_related_pages_and_no_weak_note_when_close(tmp_path):
+    _, prompt = _run_tagging(tmp_path, {
+        "documents": [["Techmarine - lore text"]],
+        "distances": [[0.3]],
+        "metadatas": [[{"source": "u", "title": "Techmarine", "categories": "Space Marines, Troops (Space Marines)"}]],
+    }, '{"tags": []}')
+    assert "Related wiki pages:" in prompt
+    assert "[Categories: Space Marines, Troops (Space Marines)]" in prompt
+    assert "weak match" not in prompt
+
+
+def test_prompt_warns_on_weak_context(tmp_path):
+    _, prompt = _run_tagging(tmp_path, {
+        "documents": [["Obliterator Virus - unrelated lore"]],
+        "distances": [[0.66]],
+        "metadatas": [[{"source": "u", "title": "Obliterator Virus", "categories": "Diseases"}]],
+    }, '{"tags": []}')
+    assert "weak match" in prompt
+
+
+def test_header_mismatch_exits(tmp_path):
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "m.stl").write_text("mesh")
+    out_csv = tmp_path / "tags.csv"
+    out_csv.write_text("filename,tags\nold.stl,foo\n")
+
+    with patch("tagging.PersistentClient", return_value=MagicMock()):
+        from tagging import run_tagging
+        with pytest.raises(SystemExit, match="fresh"):
+            run_tagging(str(zips), str(out_csv), str(tmp_path / "db"), None, "warhammer", use_local=True)
+
+
+def test_is_article_url():
+    from embed import is_article_url
+    assert is_article_url("https://wh40k.lexicanum.com/wiki/Techmarine")
+    assert is_article_url("https://wh40k.lexicanum.com/wiki/Codex:_Space_Marines")
+    assert not is_article_url("https://wh40k.lexicanum.com/wiki/File:BStechmarine.jpg")
+    assert not is_article_url("https://wh40k.lexicanum.com/wiki/Category:Characters_(Techmarines)")
+    assert not is_article_url("https://wh40k.lexicanum.com/wiki/Template:Infobox")
+    assert not is_article_url("https://wh40k.lexicanum.com/wiki/User_talk:Someone")
+    assert not is_article_url("https://wh40k.lexicanum.com/wiki/Lexicanum:Citation")
+
+
+def test_run_embedding_skips_namespace_pages(tmp_path):
+    docs = [
+        {"url": "https://x.com/wiki/Techmarine", "title": "Techmarine", "text": "Real lore."},
+        {"url": "https://x.com/wiki/File:Pic.jpg", "title": "File:Pic.jpg", "text": "image page"},
+        {"url": "https://x.com/wiki/Category:Orks", "title": "Category:Orks", "text": "listing"},
+    ]
+    lore_path = tmp_path / "lore.json"
+    lore_path.write_text(json.dumps(docs))
+    mock_col = MagicMock()
+    with patch("embed.chromadb.PersistentClient") as mock_pc:
+        mock_pc.return_value.get_or_create_collection.return_value = mock_col
+        from embed import run_embedding
+        run_embedding(str(lore_path), str(tmp_path / "db"))
+    ids = mock_col.upsert.call_args.kwargs["ids"]
+    assert all("Techmarine" in i for i in ids)

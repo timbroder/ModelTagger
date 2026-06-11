@@ -135,11 +135,12 @@ def select_context_docs(
     delta: float = 0.15,
     per_page: int = 2,
     min_docs: int = 3,
-) -> list[str]:
-    """Pick context docs by rank: everything within ``delta`` of the best
-    distance (always at least ``min_docs``), capped at ``per_page`` chunks
-    per source page so one article can't crowd out the rest."""
-    picked: list[str] = []
+) -> list[tuple[str, dict | None]]:
+    """Pick context (doc, metadata) pairs by rank: everything within ``delta``
+    of the best distance (always at least ``min_docs``), capped at
+    ``per_page`` chunks per source page so one article can't crowd out the
+    rest."""
+    picked: list[tuple[str, dict | None]] = []
     counts: dict[str, int] = {}
     best = distances[0]
     for doc, dist, meta in zip(documents, distances, metadatas):
@@ -148,12 +149,71 @@ def select_context_docs(
             continue
         if dist > best + delta and len(picked) >= min_docs:
             break
-        picked.append(doc)
+        picked.append((doc, meta))
         if src is not None:
             counts[src] = counts.get(src, 0) + 1
         if len(picked) >= max_docs:
             break
     return picked
+
+
+def related_pages_block(metadatas: list[dict | None]) -> str:
+    """Summarize the retrieved pages' titles and wiki categories for the LLM.
+
+    The categories are pre-made faction/role/allegiance labels — the most
+    direct taxonomy signal retrieval produces.
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+    for meta in metadatas:
+        title = (meta or {}).get("title")
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        cats = (meta or {}).get("categories") or ""
+        lines.append(f"- {title}" + (f" [Categories: {cats}]" if cats else ""))
+    if not lines:
+        return ""
+    return "Related wiki pages:\n" + "\n".join(lines) + "\n\n"
+
+
+# Above this best-match cosine distance the retrieved context is probably
+# unrelated (third-party minis with no wiki page) — warn the LLM rather than
+# let it weave noise into the tags
+_WEAK_CONTEXT_DISTANCE = 0.55
+_WEAK_CONTEXT_NOTE = (
+    "Note: the lore context below was only a weak match for this file name. "
+    "Ignore it unless it is clearly about this miniature; otherwise rely on "
+    "the file names and your own knowledge.\n\n"
+)
+
+
+def parse_structured(raw: str, fields: list[str]) -> dict:
+    """Parse the LLM's JSON tag object into {field: str, "tags": [str]}.
+
+    Falls back to treating the response as a flat tag list when no valid
+    JSON object is found. "unknown"-like values become empty strings.
+    """
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            out: dict = {}
+            for f in fields:
+                v = data.get(f, "")
+                if isinstance(v, list):
+                    v = ", ".join(str(x).strip() for x in v if str(x).strip())
+                v = str(v).strip()
+                out[f] = "" if v.lower() in ("unknown", "none", "n/a", "null") else v
+            tags = data.get("tags", [])
+            if isinstance(tags, str):
+                tags = parse_tags(tags)
+            out["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+            return out
+    return {**{f: "" for f in fields}, "tags": parse_tags(raw)}
 
 
 def get_tokenizer(model: str):
@@ -191,7 +251,8 @@ def ask_local_model(prompt: str, model: str) -> str:
         ensure_local_model(model)
         resp = requests.post(
             "http://localhost:11434/api/generate",
-            json={"model": model, "prompt": prompt, "temperature": 0.2, "stream": False},
+            json={"model": model, "prompt": prompt, "temperature": 0.2, "stream": False,
+                  "format": "json"},
             timeout=60,
         )
         resp.raise_for_status()
@@ -212,7 +273,7 @@ def ask_openai(prompt: str, model: str = "gpt-4.1", retries: int = 3) -> tuple[s
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=150
+                max_tokens=300
             )
             completion_text = response.choices[0].message.content
             if response.usage is not None:
@@ -268,6 +329,13 @@ def run_tagging(
 
     vector_db_path = vector_db_path or presets["vector_db"]
     prompt = prompt_override or presets["prompt"]
+    fields = presets.get("fields", [])
+    header = ["filename"] + fields + ["tags"]
+
+    def make_row(filename: str, parsed: dict | None = None, tags: list | None = None) -> list:
+        parsed = parsed or {}
+        tag_list = tags if tags is not None else parsed.get("tags", [])
+        return [filename] + [parsed.get(f, "") for f in fields] + [", ".join(tag_list)]
 
     chroma_client = PersistentClient(path=vector_db_path)
     collection = chroma_client.get_or_create_collection(name="lore")
@@ -283,7 +351,12 @@ def run_tagging(
     if file_exists:
         with open(output_csv, newline="") as rf:
             reader = csv.reader(rf)
-            next(reader, None)
+            existing_header = next(reader, None)
+            if existing_header != header:
+                raise SystemExit(
+                    f"{output_csv} has columns {existing_header} but this mode produces "
+                    f"{header}. Point --tag-output at a fresh file."
+                )
             for row in reader:
                 if row:
                     processed.add(row[0])
@@ -291,7 +364,7 @@ def run_tagging(
     with open(output_csv, 'a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["filename", "tags"])
+            writer.writerow(header)
 
         for path in Path(zips_dir).iterdir():
             if path.suffix.lower() not in [".zip", ".rar", ".7z", ".stl", ".obj", ".png"]:
@@ -304,7 +377,7 @@ def run_tagging(
                 temp_dir = extract_to_temp(path)
                 if not temp_dir or not is_valid_archive_content(temp_dir):
                     print(f"Skipping {path.name} — invalid content")
-                    writer.writerow([path.name, ""])
+                    writer.writerow(make_row(path.name))
                     processed.add(path.name)
                     continue
 
@@ -362,23 +435,26 @@ def run_tagging(
                 if not documents:
                     print(f"Skipping {path.name} — no lore found in vector DB")
                     logging.warning(f"No lore retrieved for {path.name}")
-                    writer.writerow([path.name, ""])
+                    writer.writerow(make_row(path.name))
                     processed.add(path.name)
                     continue
 
                 if rerank:
                     scores = cross_encoder.predict([(query_text, d) for d in documents])
-                    ranked = [d for d, _ in sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)]
-                    confident_docs = ranked[:8]
+                    ranked = sorted(zip(documents, metadatas, scores), key=lambda x: x[2], reverse=True)
+                    confident_docs = [(d, m) for d, m, _ in ranked[:8]]
                 else:
                     confident_docs = select_context_docs(documents, distances, metadatas)
 
+                context_note = _WEAK_CONTEXT_NOTE if distances[0] > _WEAK_CONTEXT_DISTANCE else ""
+                related = related_pages_block([m for _, m in confident_docs])
+
                 chosen_model = local_model if use_local else model
-                prompt_tokens = count_tokens(prompt, model=chosen_model)
+                prompt_tokens = count_tokens(prompt + context_note + related, model=chosen_model)
                 context_budget = token_budget - prompt_tokens - 300
                 current = 0
                 context_chunks = []
-                for doc in confident_docs:
+                for doc, _ in confident_docs:
                     t = count_tokens(doc, model=chosen_model)
                     if current + t > context_budget:
                         break
@@ -389,6 +465,7 @@ def run_tagging(
                 full_prompt = (
                     f"{prompt}\n\nThe primary subject in question is \"{normalized_base_name}\".\n\n"
                     f"Secondary subjects could include \"{joined_names}\"\n\n"
+                    f"{context_note}{related}"
                     f"Lore context follows until the end of this message:\n{context}\n\n"
                 )
 
@@ -401,13 +478,12 @@ def run_tagging(
                 if tags.strip().lower() == "unknown":
                     print(f"[Fallback] Generation failed for {path.name}. Using Chroma document snippets.")
                     logging.warning(f"Fallback to Chroma for {path.name}")
-                    tag_result = [doc[:50] for doc in documents[:5]]
-                    writer.writerow([path.name, ", ".join(tag_result)])
+                    writer.writerow(make_row(path.name, tags=[doc[:50] for doc in documents[:5]]))
                     processed.add(path.name)
                     continue
 
-                tag_result = parse_tags(tags)
-                writer.writerow([path.name, ", ".join(tag_result)])
+                parsed = parse_structured(tags, fields)
+                writer.writerow(make_row(path.name, parsed))
                 processed.add(path.name)
                 if use_local:
                     print(f"Tagged {path.name} [local] using ~{token_count} tokens")
@@ -418,7 +494,7 @@ def run_tagging(
             except Exception as e:
                 print(f"Error processing {path.name}: {e}")
                 logging.error(f"Tagging failed for {path.name}: {e}")
-                writer.writerow([path.name, ""])
+                writer.writerow(make_row(path.name))
                 processed.add(path.name)
             finally:
                 if temp_dir:
