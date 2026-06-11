@@ -203,14 +203,44 @@ the prompt (works in OpenAI mode too).
 ### 4. Upload to Manyfold
 
 ```bash
-python src/main.py upload --mode warhammer   # or --csv path/to/tags.csv
+# verify what your instance's API supports first
+python src/main.py upload --check
+
+# preview the sync without writing anything
+python src/main.py upload --mode warhammer --zips data/zips \
+    --library-path /path/to/manyfold/library --dry-run
+
+# then for real
+python src/main.py upload --mode warhammer --zips data/zips \
+    --library-path /path/to/manyfold/library
 ```
 
-Set `MANYFOLD_API_URL` and `MANYFOLD_API_TOKEN` in your environment.
+Environment: `MANYFOLD_API_URL` plus either `MANYFOLD_API_TOKEN` or
+`MANYFOLD_CLIENT_ID`/`MANYFOLD_CLIENT_SECRET` (OAuth client credentials).
+`MANYFOLD_LIBRARY_PATH` can replace `--library-path`.
 
-> ⚠️ **Dry run only.** This step currently checks whether each model already
-> exists in Manyfold and prints what it *would* upload. The actual file
-> upload / tag POST is not implemented yet.
+How the sync works:
+
+- **Models already in Manyfold** (matched by normalized name, with a
+  conservative fuzzy fallback) get their tags updated with namespaced tags
+  from the CSV (`faction: Adepta Sororitas`, `unit: Sister Superior`, ...).
+  The pipeline only ever replaces tags in namespaces it owns — anything you
+  added by hand in the Manyfold UI survives re-runs. Models also get
+  assigned to a collection named after their faction (created on demand)
+  unless you already put them in one.
+- **Models not in Manyfold yet** are staged into the library folder:
+  archives are unpacked into a folder per model with a `datapackage.json`
+  carrying the tags (Manyfold imports it at scan time), then a library scan
+  is triggered via the API (or you're told to trigger one in the UI).
+  Re-run `upload` after the scan completes to apply collections to the
+  newly scanned models.
+- Built for large libraries: rate-limited, retrying, resumable (`--limit`
+  for incremental runs, re-staging and re-tagging are no-ops when nothing
+  changed), and `--dry-run` reports the full plan without writing.
+
+> Note: Manyfold's HTTP API doesn't support file uploads (as of v0.118), so
+> staging requires filesystem access to the library folder. `--check` probes
+> your instance's OpenAPI spec to confirm what it supports.
 
 ---
 
