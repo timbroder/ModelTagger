@@ -143,10 +143,13 @@ python src/main.py tag --zips data/zips --mode warhammer --model gpt-4o
 ```
 
 For each archive/file: extracts it, validates the contents (must contain a
-3D model or image; archives with executables are skipped), cleans dates and
-symbols out of the filenames, retrieves the most relevant lore chunks from
-Chroma (exact slug match → substring match → unfiltered, keeping whichever
-set matches closest), and asks the LLM for tags within `--token-budget`.
+3D model or image; archives with executables are skipped), cleans the
+filenames (dates, symbols, and print-prep junk like "presupported"/"v2" are
+dropped), retrieves the most relevant lore chunks from Chroma — preferring
+pages whose name matches any word or bigram of the file name, falling back
+to a pure semantic query — and asks the LLM for tags within
+`--token-budget`. Context keeps everything close to the best match, capped
+at 2 chunks per page so one article can't crowd out the rest.
 
 - Results append to the `--tag-output` CSV (`filename, tags`; default the
   preset's `tag_output`, e.g. `tags-warhammer.csv`); already-listed files are

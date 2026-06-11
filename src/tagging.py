@@ -72,6 +72,90 @@ def clean_file_name(name: str) -> str:
     name = re.sub(r"[^0-9a-zA-Z]+", " ", name)  # Replace symbols with spaces
     return re.sub(r"\s+", " ", name).strip()
 
+# Tokens that describe print files rather than the miniature subject
+_JUNK_TOKENS = {
+    "supported", "presupported", "unsupported", "presup", "sup", "supports",
+    "support", "base", "bases", "body", "bodies", "head", "heads", "arm",
+    "arms", "leg", "legs", "left", "right", "part", "parts", "bits", "bit",
+    "stl", "obj", "lys", "chitubox", "lychee", "final", "fixed", "repaired",
+    "hollow", "hollowed", "solid", "raw", "merged", "split", "cut", "uncut",
+    "version", "copy", "new", "old", "test", "print", "prints", "file", "files",
+}
+
+
+def filter_query_tokens(words: list[str]) -> list[str]:
+    """Drop filename tokens that carry no lore signal: print-prep words,
+    anything with digits (versions, dates, print-farm suffixes), and
+    fragments. Deduplicates case-insensitively, preserving order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for w in words:
+        lw = w.lower()
+        if lw in _JUNK_TOKENS:
+            continue
+        if any(ch.isdigit() for ch in w):
+            continue
+        if len(w) <= 2:
+            continue
+        if lw not in seen:
+            seen.add(lw)
+            out.append(w)
+    return out
+
+
+def candidate_slugs(words: list[str]) -> list[str]:
+    """Page slugs worth looking up for a cleaned file name: the full name,
+    each adjacent bigram, and each individual word (4+ chars).
+
+    A file like "Wolfspear Techmarine" rarely matches a page slug as a whole,
+    but "wolfspear" and "techmarine" each do.
+    """
+    slugs: list[str] = []
+    if words:
+        slugs.append(slugify(" ".join(words)))
+    for i in range(len(words) - 1):
+        slugs.append(slugify(f"{words[i]} {words[i + 1]}"))
+    for w in words:
+        if len(w) >= 4:
+            slugs.append(slugify(w))
+    seen: set[str] = set()
+    out: list[str] = []
+    for s in slugs:
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def select_context_docs(
+    documents: list[str],
+    distances: list[float],
+    metadatas: list[dict | None],
+    max_docs: int = 8,
+    delta: float = 0.15,
+    per_page: int = 2,
+    min_docs: int = 3,
+) -> list[str]:
+    """Pick context docs by rank: everything within ``delta`` of the best
+    distance (always at least ``min_docs``), capped at ``per_page`` chunks
+    per source page so one article can't crowd out the rest."""
+    picked: list[str] = []
+    counts: dict[str, int] = {}
+    best = distances[0]
+    for doc, dist, meta in zip(documents, distances, metadatas):
+        src = (meta or {}).get("source")
+        if src is not None and counts.get(src, 0) >= per_page:
+            continue
+        if dist > best + delta and len(picked) >= min_docs:
+            break
+        picked.append(doc)
+        if src is not None:
+            counts[src] = counts.get(src, 0) + 1
+        if len(picked) >= max_docs:
+            break
+    return picked
+
+
 def get_tokenizer(model: str):
     """Get the appropriate tiktoken encoder for the given model."""
     import tiktoken
@@ -247,54 +331,47 @@ def run_tagging(
                         seen.add(word)
                 normalized_base_name = " ".join(deduped_words)
 
-                slugified_term = slugify(normalized_base_name)
+                # Build the retrieval query from cleaned filename tokens —
+                # print-prep words and digit suffixes only dilute the embedding
+                base_words = filter_query_tokens(normalized_base_name.split())
+                query_text = " ".join(filter_query_tokens(joined_names.split())) \
+                    or normalized_base_name or path.stem
 
-                # Retrieve candidate chunks: try the slug-filtered and
-                # substring-filtered queries first, falling back to an
-                # unfiltered query only when neither returns anything.
-                # Among the candidate result sets, keep the one whose best
-                # match is closest.
-                filtered_specs = [
-                    {
-                        "where_document": {"$contains": normalized_base_name},
-                        "where": {"slug": {"$eq": slugified_term}},
-                    },
-                    {"where_document": {"$contains": normalized_base_name}},
-                ]
-                candidates = []  # (results, filtered) pairs with non-empty documents
-                for spec in filtered_specs:
-                    results = collection.query(query_texts=[joined_names], n_results=10, **spec)
-                    if results["documents"][0]:
-                        candidates.append((results, True))
-                if not candidates:
-                    results = collection.query(query_texts=[joined_names], n_results=10)
-                    if results["documents"][0]:
-                        candidates.append((results, False))
+                # Retrieve candidate chunks: prefer chunks from pages whose
+                # slug matches any n-gram of the file name (a strong on-topic
+                # signal), falling back to an unfiltered semantic query.
+                slugs = candidate_slugs(base_words)
+                results = None
+                if slugs:
+                    results = collection.query(
+                        query_texts=[query_text],
+                        n_results=20,
+                        where={"slug": {"$in": slugs}},
+                    )
+                    if not results["documents"][0]:
+                        results = None
+                if results is None:
+                    results = collection.query(query_texts=[query_text], n_results=20)
 
-                if not candidates:
+                documents = results["documents"][0]
+                distances = results["distances"][0]
+                metadatas = (results.get("metadatas") or [[]])[0]
+                if len(metadatas) != len(documents):
+                    metadatas = [None] * len(documents)
+
+                if not documents:
                     print(f"Skipping {path.name} — no lore found in vector DB")
                     logging.warning(f"No lore retrieved for {path.name}")
                     writer.writerow([path.name, ""])
                     processed.add(path.name)
                     continue
 
-                best_results, filtered = min(candidates, key=lambda c: c[0]["distances"][0][0])
-                documents = best_results["documents"][0]
-                distances = best_results["distances"][0]
-
                 if rerank:
-                    scores = cross_encoder.predict([(joined_names, d) for d in documents])
+                    scores = cross_encoder.predict([(query_text, d) for d in documents])
                     ranked = [d for d, _ in sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)]
                     confident_docs = ranked[:8]
                 else:
-                    # Filtered queries already guarantee relevance, so allow a
-                    # looser distance threshold than the unfiltered fallback
-                    confidence_threshold = 0.3 if filtered else 0.1
-                    confident_docs = [
-                        doc for doc, dist in zip(documents, distances) if dist <= confidence_threshold
-                    ]
-                    if not confident_docs:
-                        confident_docs = [documents[0]]
+                    confident_docs = select_context_docs(documents, distances, metadatas)
 
                 chosen_model = local_model if use_local else model
                 prompt_tokens = count_tokens(prompt, model=chosen_model)
