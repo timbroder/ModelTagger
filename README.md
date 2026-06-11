@@ -109,10 +109,25 @@ python src/main.py embed --mode warhammer
 
 Reads the scrape output (`--lore-dir`: either the markdown directory, or a
 legacy `lore.json` from older versions) and writes to `--vector-db-path`
-(default: the preset's `vector_db`). Text is chunked into 300–800-token
-windows on sentence boundaries with ~20% overlap, prefixed with the page
-title, and stored in a Chroma collection named `lore` (cosine distance).
-Re-running is safe — chunks are upserted by ID.
+(default: the preset's `vector_db`). The scrape directory is treated as
+read-only — all cleanup happens here, at embed time:
+
+- wiki noise is stripped (maintenance/portal banner tables, footnote refs,
+  link targets, TOC and boilerplate sections like Sources/See also)
+- generic site titles from failed extractions are repaired from the URL
+- redirect duplicates (same article under different URLs) are deduped,
+  keeping the longest copy
+- each page also gets a dense summary chunk built from its categories and
+  infobox — the most tag-like text on the page
+
+Text is chunked on sentence boundaries with ~20% overlap and a
+`Title — Section` prefix, sized to the embedder: 80–200 tokens for Chroma's
+default model (which truncates input at 256 wordpieces) or 300–800 with
+`--use-local` bge-m3. Override with `--min-chunk-tokens`/`--max-chunk-tokens`.
+
+Re-running is safe — chunks are upserted by ID — but after changing chunk
+sizes, embed into a **fresh** `--vector-db-path` (stale chunks from the old
+layout are not deleted).
 
 > **Updating old embeddings:** if you embedded lore before the `slug`
 > metadata field existed, backfill it without re-embedding:
