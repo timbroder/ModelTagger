@@ -112,6 +112,9 @@ legacy `lore.json` from older versions) and writes to `--vector-db-path`
 (default: the preset's `vector_db`). The scrape directory is treated as
 read-only — all cleanup happens here, at embed time:
 
+- non-article namespace pages (`File:`, `Category:`, `Template:`, ...) are
+  skipped — their bodies are listings that pollute retrieval (`Codex:` page
+  titles are kept; that's not a namespace)
 - wiki noise is stripped (maintenance/portal banner tables, footnote refs,
   link targets, TOC and boilerplate sections like Sources/See also)
 - generic site titles from failed extractions are repaired from the URL
@@ -151,11 +154,25 @@ to a pure semantic query — and asks the LLM for tags within
 `--token-budget`. Context keeps everything close to the best match, capped
 at 2 chunks per page so one article can't crowd out the rest.
 
-- Results append to the `--tag-output` CSV (`filename, tags`; default the
-  preset's `tag_output`, e.g. `tags-warhammer.csv`); already-listed files are
-  skipped, so re-running resumes where it left off.
-- `--mode warhammer|dnd` selects a prompt preset from
-  `config/tagging_presets.json`; `--prompt-override` replaces it entirely.
+The LLM returns a **structured JSON record** so models can be organized
+consistently — for warhammer mode: `faction` (normalized to a canonical
+~25-faction vocabulary, so "Sisters of Battle" always lands as
+"Adepta Sororitas"), `subfaction`, `unit`, `model_type`, `role`
+(battlefield role), `allegiance` (Imperium/Chaos/Xenos), `equipment`, plus
+free-form `tags`. D&D mode uses creature/creature_type/size/class/alignment.
+Fields the model can't determine stay empty rather than guessed.
+
+- Results append to the `--tag-output` CSV with one column per field
+  (default: the preset's `tag_output`, e.g. `tags-warhammer.csv`);
+  already-listed files are skipped, so re-running resumes where it left off.
+  Changing modes against an existing CSV with different columns aborts with
+  a clear error.
+- The prompt includes the retrieved pages' titles and wiki categories (a
+  direct faction/role taxonomy signal), and when even the best lore match is
+  distant — typical for third-party minis with no wiki page — the model is
+  told to ignore the context rather than weave noise into the tags.
+- `--mode warhammer|dnd` selects the prompt and field schema from
+  `config/tagging_presets.json`; `--prompt-override` replaces the prompt.
 - If generation fails, raw lore snippets are written as fallback tags and the
   failure is logged to `tagging.log`.
 

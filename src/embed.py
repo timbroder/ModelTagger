@@ -24,6 +24,16 @@ _LOCAL_EF_MIN_TOKENS = 300
 # on some Wayback snapshot layouts) — derive a title from the URL instead
 _SITE_TITLE_RE = re.compile(r"lexicanum|fandom|wikia|just a moment", re.IGNORECASE)
 
+# Non-article MediaWiki namespaces: image description pages, category
+# listings, templates, ... Their bodies are listings/boilerplate that pollute
+# retrieval (30% of a sitemap-seeded crawl). Note "Codex:" page titles are NOT
+# a namespace and must be kept.
+_NON_ARTICLE_NAMESPACES = {
+    "file", "image", "media", "category", "template", "portal", "help",
+    "user", "talk", "special", "mediawiki", "module", "timedtext", "forum",
+    "lexicanum", "draft", "gadget",
+}
+
 # Wiki sections that carry no lore signal for tagging
 _BOILERPLATE_SECTIONS = {
     "contents", "sources", "see also", "related articles", "notes",
@@ -114,6 +124,15 @@ def repair_title(title: str | None, url: str) -> str:
         return title
     segment = unquote(urlparse(url).path.rstrip("/").split("/")[-1])
     return segment.replace("_", " ").replace("-", " ")
+
+
+def is_article_url(url: str) -> bool:
+    """True if the wiki URL points at a main-namespace article."""
+    segment = unquote(urlparse(url).path.rstrip("/").split("/")[-1])
+    if ":" not in segment:
+        return True
+    ns = segment.split(":", 1)[0].strip().lower().replace("_", " ")
+    return not (ns in _NON_ARTICLE_NAMESPACES or ns.endswith("talk"))
 
 
 def dedupe_documents(documents: list[dict]) -> list[dict]:
@@ -278,7 +297,11 @@ def run_embedding(
             metadata={"hnsw:space": "cosine"},
         )
 
-    documents = dedupe_documents(load_documents(input_path))
+    documents = load_documents(input_path)
+    articles = [d for d in documents if is_article_url(d.get("url", ""))]
+    if len(articles) < len(documents):
+        print(f"Skipped {len(documents) - len(articles)} non-article namespace pages (File:, Category:, ...)")
+    documents = dedupe_documents(articles)
 
     prepared = []
     with tqdm(total=len(documents), desc="Processing Documents") as doc_pbar:
