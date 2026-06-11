@@ -86,11 +86,20 @@ Worth knowing for long scrapes:
   raw HTML, then the most recent Wayback Machine snapshot. Login walls and
   Cloudflare challenges are detected and rejected.
 - **Lexicanum goes through Wayback.** `wh40k.lexicanum.com` is hardcoded to
-  skip the live site (login wall) and search Wayback's CDX API for a usable
-  snapshot, newest first.
+  skip the live site (Cloudflare-walled) and use Wayback snapshots, newest
+  first. The snapshot list for the whole domain is bulk-fetched from the CDX
+  API once at startup and cached as `_snapshots_<domain>.json` in the output
+  dir (delete to refresh), so each page costs exactly one snapshot fetch —
+  no per-page CDX queries.
+- **Transient failures requeue.** A network-level failure puts the page back
+  in the queue (up to 3 tries per run) instead of skipping it; only "no
+  snapshot exists" is a permanent skip. Skipped pages are never written to
+  `_visited.txt`, so a later resume retries them too.
 - **Rate limiting.** Wayback requests are globally limited to ~1/sec with
-  shared exponential backoff on 429/503; live sites get a 1 req/sec per-domain
-  politeness delay. Expect roughly one page per second — plan accordingly.
+  shared, jittered exponential backoff on 429/503; live sites get a 1 req/sec
+  per-domain politeness delay. Expect roughly one page per second.
+- Non-article namespace URLs (`File:`, `Category:`, ...) are skipped at
+  scrape time — both in seeds and discovered links.
 - The crawler follows same-domain `/wiki/` links up to `--max-depth` and stops
   at `--max-pages` total pages.
 

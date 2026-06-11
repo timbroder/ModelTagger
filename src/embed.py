@@ -10,7 +10,7 @@ import re
 from urllib.parse import urlparse, unquote
 from tqdm import tqdm
 
-from utils import slugify
+from utils import slugify, is_article_url
 
 # Chroma's default embedding function (MiniLM-L6) truncates input at 256
 # wordpiece tokens. cl100k tokens run denser than wordpieces and chunks get a
@@ -23,16 +23,6 @@ _LOCAL_EF_MIN_TOKENS = 300
 # Page titles matching this are the site-wide <title> (title extraction failed
 # on some Wayback snapshot layouts) — derive a title from the URL instead
 _SITE_TITLE_RE = re.compile(r"lexicanum|fandom|wikia|just a moment", re.IGNORECASE)
-
-# Non-article MediaWiki namespaces: image description pages, category
-# listings, templates, ... Their bodies are listings/boilerplate that pollute
-# retrieval (30% of a sitemap-seeded crawl). Note "Codex:" page titles are NOT
-# a namespace and must be kept.
-_NON_ARTICLE_NAMESPACES = {
-    "file", "image", "media", "category", "template", "portal", "help",
-    "user", "talk", "special", "mediawiki", "module", "timedtext", "forum",
-    "lexicanum", "draft", "gadget",
-}
 
 # Wiki sections that carry no lore signal for tagging
 _BOILERPLATE_SECTIONS = {
@@ -124,15 +114,6 @@ def repair_title(title: str | None, url: str) -> str:
         return title
     segment = unquote(urlparse(url).path.rstrip("/").split("/")[-1])
     return segment.replace("_", " ").replace("-", " ")
-
-
-def is_article_url(url: str) -> bool:
-    """True if the wiki URL points at a main-namespace article."""
-    segment = unquote(urlparse(url).path.rstrip("/").split("/")[-1])
-    if ":" not in segment:
-        return True
-    ns = segment.split(":", 1)[0].strip().lower().replace("_", " ")
-    return not (ns in _NON_ARTICLE_NAMESPACES or ns.endswith("talk"))
 
 
 def dedupe_documents(documents: list[dict]) -> list[dict]:
