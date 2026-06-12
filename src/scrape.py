@@ -303,7 +303,7 @@ def _fetch_html(url: str, resp: requests.Response | None = None) -> dict | None:
 def _fetch_wayback(url: str) -> dict | None:
     """Fetch the most recent Wayback Machine snapshot for a URL."""
     try:
-        resp = _wayback_get(f"https://web.archive.org/web/{url}")
+        resp = _wayback_get(f"https://web.archive.org/web/{url}", timeout=_SNAPSHOT_FETCH_TIMEOUT)
         return _fetch_html(f"https://web.archive.org/web/{url}", resp=resp) if resp else None
     except Exception:
         return None
@@ -318,6 +318,11 @@ _snapshot_indexes: dict[str, dict[str, list[str]]] = {}
 
 _SNAPSHOT_MONTHS = 72  # how many monthly snapshots to keep per page (~6 years)
 _CDX_PAGE_LIMIT = 50000  # rows per bulk CDX request (resume-key pagination)
+
+# Freshly crawled captures are served slowly while Wayback consolidates them
+# (observed: June-2026 snapshots routinely exceeding 10s), so give snapshot
+# fetches a generous timeout rather than burning retries on slow successes
+_SNAPSHOT_FETCH_TIMEOUT = 30
 
 
 def _snapshot_key(url: str) -> str:
@@ -410,7 +415,7 @@ def _fetch_snapshots(url: str, timestamps: list[str]) -> dict | None:
     network_failures = 0
     for ts in timestamps:
         wayback_url = f"https://web.archive.org/web/{ts}/{url}"
-        page_resp = _wayback_get(wayback_url)
+        page_resp = _wayback_get(wayback_url, timeout=_SNAPSHOT_FETCH_TIMEOUT)
         if page_resp is None:
             network_failures += 1
             continue
