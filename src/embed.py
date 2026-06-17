@@ -236,14 +236,17 @@ def semantic_chunk_text(
 
 def load_documents(input_path: str) -> list[dict]:
     if os.path.isdir(input_path):
+        fnames = [
+            f for f in sorted(os.listdir(input_path))
+            if f.endswith(".md") and not f.startswith("_")
+        ]
         documents = []
-        for fname in sorted(os.listdir(input_path)):
-            if fname.endswith(".md") and not fname.startswith("_"):
-                with open(os.path.join(input_path, fname), encoding="utf-8") as f:
-                    post = frontmatter.load(f)
-                doc = dict(post.metadata)
-                doc["text"] = post.content
-                documents.append(doc)
+        for fname in tqdm(fnames, desc="Loading lore files"):
+            with open(os.path.join(input_path, fname), encoding="utf-8") as f:
+                post = frontmatter.load(f)
+            doc = dict(post.metadata)
+            doc["text"] = post.content
+            documents.append(doc)
         return documents
     with open(input_path) as f:
         return json.load(f)
