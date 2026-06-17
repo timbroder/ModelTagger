@@ -201,6 +201,20 @@ def test_embedding_never_splits_a_document_across_batches(tmp_path):
     assert not split, f"these sources were split across batches: {split}"
 
 
+def test_run_embedding_skips_docs_missing_url(tmp_path):
+    # A scraped file with no url in frontmatter must be skipped, not crash
+    # (regression: KeyError 'url' on the last document of a 25k-doc run).
+    docs = [
+        {"title": "No URL", "text": "Orphan lore with no url field. " * 4},
+        {"url": "https://x.com/wiki/Good", "title": "Good", "text": "Real lore here. " * 4},
+    ]
+    mock_col = _run_embedding_with_mock(tmp_path, docs)
+    sources = set()
+    for call in mock_col.upsert.call_args_list:
+        sources.update(m["source"] for m in call.kwargs["metadatas"])
+    assert sources == {"https://x.com/wiki/Good"}
+
+
 def test_embedded_sources_handles_missing_collection():
     from embed import embedded_sources
     bad = MagicMock()

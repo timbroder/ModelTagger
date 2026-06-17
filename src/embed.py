@@ -310,56 +310,18 @@ def run_embedding(
     if already_embedded:
         print(f"Resuming: {len(already_embedded)} documents already embedded, skipping them")
 
-    prepared = []
-    with tqdm(total=len(documents), desc="Processing Documents") as doc_pbar:
-        for doc in documents:
-            text = doc["text"]
-            url = doc["url"]
-            if url in already_embedded:
-                doc_pbar.update(1)
-                continue
-            # Skip redirect pages and empty documents
-            if not text.strip() or text.lstrip().lower().startswith(("redirect to:", "#redirect")):
-                doc_pbar.update(1)
-                continue
-
-            text = clean_markdown(text)
-            title = repair_title(doc.get("title"), url)
-
-            # (section, chunk_text) pairs; summary chunk first
-            chunks: list[tuple[str, str]] = []
-            summary = build_summary_chunk(
-                title, doc.get("categories") or [], doc.get("infobox") or {}
-            )
-            if summary:
-                chunks.append(("_summary", summary))
-
-            for section, body in split_sections(text):
-                prefix = f"{title} — {section}" if section else title
-                for raw in semantic_chunk_text(
-                    body, min_tokens=min_chunk_tokens, max_tokens=max_chunk_tokens, model=model
-                ):
-                    chunks.append((section, f"{prefix} - {raw}"))
-
-            if not chunks:
-                doc_pbar.update(1)
-                continue
-
-            slug = slugify(unquote(urlparse(url).path.rstrip("/").split("/")[-1]))
-            categories = ", ".join(str(c) for c in doc.get("categories") or [])
-            prepared.append((url, slug, title, categories, chunks))
-            doc_pbar.update(1)
-
-    # Embed in batches, but never split a single document across two upserts:
-    # flushing on document boundaries guarantees that a source URL present in
-    # the collection is fully embedded, which is what makes resume correct.
-    # (Multiple whole documents may share a batch — each upsert is atomic.)
+    # Chunk and embed in a single pass over documents so an interrupted run is
+    # resumable mid-corpus (a crash during the slow chunking phase would
+    # otherwise leave nothing embedded and force a full redo). Batches never
+    # split a single document across two upserts: a source URL present in the
+    # collection is therefore always fully embedded, which is what makes the
+    # resume skip above correct. Multiple whole documents may share a batch —
+    # each upsert is atomic.
     batch_docs: list[str] = []
     batch_metas: list[dict] = []
     batch_ids: list[str] = []
-    total_chunks = sum(len(chunks) for *_, chunks in prepared)
 
-    with tqdm(total=total_chunks, desc="Embedding") as pbar:
+    with tqdm(total=len(documents), desc="Embedding documents") as pbar:
         def flush():
             if not batch_ids:
                 return
@@ -371,12 +333,41 @@ def run_embedding(
                 metadatas=list(batch_metas),
                 ids=list(batch_ids),
             )
-            pbar.update(len(batch_ids))
             batch_docs.clear()
             batch_metas.clear()
             batch_ids.clear()
 
-        for url, slug, title, categories, chunks in prepared:
+        for doc in documents:
+            pbar.update(1)
+            url = doc.get("url")
+            text = doc.get("text") or ""
+            # Need a url for chunk IDs/slug; skip redirects and empties
+            if not url or url in already_embedded:
+                continue
+            if not text.strip() or text.lstrip().lower().startswith(("redirect to:", "#redirect")):
+                continue
+
+            text = clean_markdown(text)
+            title = repair_title(doc.get("title"), url)
+
+            chunks: list[tuple[str, str]] = []  # (section, chunk_text); summary first
+            summary = build_summary_chunk(
+                title, doc.get("categories") or [], doc.get("infobox") or {}
+            )
+            if summary:
+                chunks.append(("_summary", summary))
+            for section, body in split_sections(text):
+                prefix = f"{title} — {section}" if section else title
+                for raw in semantic_chunk_text(
+                    body, min_tokens=min_chunk_tokens, max_tokens=max_chunk_tokens, model=model
+                ):
+                    chunks.append((section, f"{prefix} - {raw}"))
+            if not chunks:
+                continue
+
+            slug = slugify(unquote(urlparse(url).path.rstrip("/").split("/")[-1]))
+            categories = ", ".join(str(c) for c in doc.get("categories") or [])
+
             # Flush before adding this doc if it would overflow the batch, so
             # each upsert ends on a whole-document boundary
             if batch_ids and len(batch_ids) + len(chunks) > batch_size:
