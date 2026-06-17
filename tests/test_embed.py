@@ -215,6 +215,25 @@ def test_run_embedding_skips_docs_missing_url(tmp_path):
     assert sources == {"https://x.com/wiki/Good"}
 
 
+def test_run_embedding_dedupes_same_url_across_files(tmp_path):
+    # Two files with the SAME url but different titles (one generic site
+    # title) both survive title-based dedupe; without a url guard their
+    # chunk IDs collide inside one upsert (regression: DuplicateIDError on
+    # .../wiki/13-X). Each url must be embedded at most once.
+    docs = [
+        {"url": "https://wh40k.lexicanum.com/wiki/13-X", "title": "13-X",
+         "text": "Real article text about the 13-X. " * 4},
+        {"url": "https://wh40k.lexicanum.com/wiki/13-X", "title": "Warhammer 40k - Lexicanumβ",
+         "text": "Duplicate scrape of the same page. " * 4},
+    ]
+    mock_col = _run_embedding_with_mock(tmp_path, docs)
+    all_ids = []
+    for call in mock_col.upsert.call_args_list:
+        all_ids.extend(call.kwargs["ids"])
+    assert len(all_ids) == len(set(all_ids)), f"duplicate chunk ids: {all_ids}"
+    assert all(i.startswith("https://wh40k.lexicanum.com/wiki/13-X#") for i in all_ids)
+
+
 def test_embedded_sources_handles_missing_collection():
     from embed import embedded_sources
     bad = MagicMock()

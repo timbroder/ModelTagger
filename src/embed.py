@@ -337,12 +337,17 @@ def run_embedding(
             batch_metas.clear()
             batch_ids.clear()
 
+        seen_urls: set[str] = set()
         for doc in documents:
             pbar.update(1)
             url = doc.get("url")
             text = doc.get("text") or ""
-            # Need a url for chunk IDs/slug; skip redirects and empties
-            if not url or url in already_embedded:
+            # Need a url for chunk IDs/slug; skip redirects and empties.
+            # seen_urls guards against two files sharing one url (chunk IDs are
+            # url-derived, so a duplicate url would collide inside an upsert) —
+            # this happens when a redirect duplicate keeps the generic site
+            # title and dedupe_documents therefore keys it separately.
+            if not url or url in already_embedded or url in seen_urls:
                 continue
             if not text.strip() or text.lstrip().lower().startswith(("redirect to:", "#redirect")):
                 continue
@@ -364,6 +369,7 @@ def run_embedding(
                     chunks.append((section, f"{prefix} - {raw}"))
             if not chunks:
                 continue
+            seen_urls.add(url)
 
             slug = slugify(unquote(urlparse(url).path.rstrip("/").split("/")[-1]))
             categories = ", ".join(str(c) for c in doc.get("categories") or [])
