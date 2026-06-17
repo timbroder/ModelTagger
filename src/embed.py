@@ -234,6 +234,21 @@ def semantic_chunk_text(
     return chunks
 
 
+def embedded_sources(collection) -> set[str]:
+    """Return the set of source URLs already fully embedded in the collection.
+
+    Used to resume an interrupted run: documents whose URL appears here are
+    skipped. This is only safe because embedding flushes on document
+    boundaries (see run_embedding), so a present source is always complete.
+    """
+    try:
+        existing = collection.get(include=["metadatas"])
+        metas = existing.get("metadatas") or []
+        return {m["source"] for m in metas if isinstance(m, dict) and m.get("source")}
+    except Exception:
+        return set()
+
+
 def load_documents(input_path: str) -> list[dict]:
     if os.path.isdir(input_path):
         fnames = [
@@ -260,6 +275,7 @@ def run_embedding(
     model: str = "gpt-4o",
     min_chunk_tokens: int | None = None,
     max_chunk_tokens: int | None = None,
+    batch_size: int = 100,
 ) -> None:
     if max_chunk_tokens is None:
         max_chunk_tokens = _LOCAL_EF_MAX_TOKENS if use_local else _DEFAULT_EF_MAX_TOKENS
@@ -287,11 +303,21 @@ def run_embedding(
         print(f"Skipped {len(documents) - len(articles)} non-article namespace pages (File:, Category:, ...)")
     documents = dedupe_documents(articles)
 
+    # Resume support: skip documents already embedded in the target collection
+    # so an interrupted run picks up near where it stopped instead of redoing
+    # the whole corpus.
+    already_embedded = embedded_sources(collection)
+    if already_embedded:
+        print(f"Resuming: {len(already_embedded)} documents already embedded, skipping them")
+
     prepared = []
     with tqdm(total=len(documents), desc="Processing Documents") as doc_pbar:
         for doc in documents:
             text = doc["text"]
             url = doc["url"]
+            if url in already_embedded:
+                doc_pbar.update(1)
+                continue
             # Skip redirect pages and empty documents
             if not text.strip() or text.lstrip().lower().startswith(("redirect to:", "#redirect")):
                 doc_pbar.update(1)
@@ -324,30 +350,49 @@ def run_embedding(
             prepared.append((url, slug, title, categories, chunks))
             doc_pbar.update(1)
 
-    # Flatten all chunks into batches for efficient embedding
-    all_docs = []
-    all_metas = []
-    all_ids = []
-    for url, slug, title, categories, chunks in prepared:
-        for idx, (section, chunk) in enumerate(chunks):
-            all_docs.append(chunk)
-            all_metas.append({
-                "source": url,
-                "slug": slug,
-                "chunk": idx,
-                "title": title,
-                "section": section,
-                "categories": categories,
-            })
-            all_ids.append(f"{url}#chunk{idx}")
+    # Embed in batches, but never split a single document across two upserts:
+    # flushing on document boundaries guarantees that a source URL present in
+    # the collection is fully embedded, which is what makes resume correct.
+    # (Multiple whole documents may share a batch — each upsert is atomic.)
+    batch_docs: list[str] = []
+    batch_metas: list[dict] = []
+    batch_ids: list[str] = []
+    total_chunks = sum(len(chunks) for *_, chunks in prepared)
 
-    batch_size = 100
-    with tqdm(total=len(all_docs), desc="Embedding") as pbar:
-        for i in range(0, len(all_docs), batch_size):
-            batch_docs = all_docs[i:i + batch_size]
-            batch_metas = all_metas[i:i + batch_size]
-            batch_ids = all_ids[i:i + batch_size]
+    with tqdm(total=total_chunks, desc="Embedding") as pbar:
+        def flush():
+            if not batch_ids:
+                return
             # upsert keeps re-runs idempotent: existing chunk IDs are updated
-            # in place instead of erroring or duplicating
-            collection.upsert(documents=batch_docs, metadatas=batch_metas, ids=batch_ids)
-            pbar.update(len(batch_docs))
+            # in place instead of erroring or duplicating. Pass copies so the
+            # subsequent clear() can't mutate data the call still references.
+            collection.upsert(
+                documents=list(batch_docs),
+                metadatas=list(batch_metas),
+                ids=list(batch_ids),
+            )
+            pbar.update(len(batch_ids))
+            batch_docs.clear()
+            batch_metas.clear()
+            batch_ids.clear()
+
+        for url, slug, title, categories, chunks in prepared:
+            # Flush before adding this doc if it would overflow the batch, so
+            # each upsert ends on a whole-document boundary
+            if batch_ids and len(batch_ids) + len(chunks) > batch_size:
+                flush()
+            for idx, (section, chunk) in enumerate(chunks):
+                batch_docs.append(chunk)
+                batch_metas.append({
+                    "source": url,
+                    "slug": slug,
+                    "chunk": idx,
+                    "title": title,
+                    "section": section,
+                    "categories": categories,
+                })
+                batch_ids.append(f"{url}#chunk{idx}")
+            # A single oversized document is its own batch
+            if len(batch_ids) >= batch_size:
+                flush()
+        flush()

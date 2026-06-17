@@ -149,6 +149,65 @@ def test_run_embedding_skips_redirects_and_dedupes(tmp_path):
     assert all(i.startswith("https://x.com/wiki/B#") for i in ids)
 
 
+def test_run_embedding_resumes_skipping_embedded_sources(tmp_path):
+    docs = [
+        {"url": "https://x.com/wiki/A", "title": "A", "text": "Alpha lore text here. " * 4},
+        {"url": "https://x.com/wiki/B", "title": "B", "text": "Bravo lore text here. " * 4},
+    ]
+    lore_path = tmp_path / "lore.json"
+    lore_path.write_text(json.dumps(docs))
+
+    mock_col = MagicMock()
+    # A is already embedded; only B should be processed on this (resumed) run
+    mock_col.get.return_value = {"metadatas": [{"source": "https://x.com/wiki/A"}]}
+    with patch("embed.chromadb.PersistentClient") as mock_pc:
+        mock_pc.return_value.get_or_create_collection.return_value = mock_col
+        from embed import run_embedding
+        run_embedding(str(lore_path), str(tmp_path / "db"))
+
+    upserted_sources = set()
+    for call in mock_col.upsert.call_args_list:
+        upserted_sources.update(m["source"] for m in call.kwargs["metadatas"])
+    assert upserted_sources == {"https://x.com/wiki/B"}
+
+
+def test_embedding_never_splits_a_document_across_batches(tmp_path):
+    # Several multi-chunk docs with a tiny batch size: each document's chunks
+    # must land entirely within one upsert call so a present source is always
+    # complete (the property resume relies on).
+    docs = [
+        {"url": f"https://x.com/wiki/{n}", "title": n, "categories": [n], "infobox": {"k": "v"},
+         "text": f"{n} lore one. {n} lore two. {n} lore three. {n} lore four. {n} lore five."}
+        for n in ("A", "B", "C", "D")
+    ]
+    lore_path = tmp_path / "lore.json"
+    lore_path.write_text(json.dumps(docs))
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": []}
+    with patch("embed.chromadb.PersistentClient") as mock_pc:
+        mock_pc.return_value.get_or_create_collection.return_value = mock_col
+        from embed import run_embedding
+        run_embedding(str(lore_path), str(tmp_path / "db"),
+                      min_chunk_tokens=5, max_chunk_tokens=15, batch_size=3)
+
+    assert mock_col.upsert.call_count >= 2  # forced into multiple batches
+    # No source appears in more than one upsert call
+    source_to_calls = {}
+    for i, call in enumerate(mock_col.upsert.call_args_list):
+        for src in {m["source"] for m in call.kwargs["metadatas"]}:
+            source_to_calls.setdefault(src, set()).add(i)
+    split = {s: c for s, c in source_to_calls.items() if len(c) > 1}
+    assert not split, f"these sources were split across batches: {split}"
+
+
+def test_embedded_sources_handles_missing_collection():
+    from embed import embedded_sources
+    bad = MagicMock()
+    bad.get.side_effect = RuntimeError("no such collection")
+    assert embedded_sources(bad) == set()
+
+
 def test_chunk_size_defaults_follow_embedder(tmp_path):
     docs = [{"url": "https://x.com/wiki/A", "title": "A", "text": "Some lore text."}]
     captured = {}
