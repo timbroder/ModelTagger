@@ -443,9 +443,21 @@ def run_tagging(
                     f"{output_csv} has columns {existing_header} but this mode produces "
                     f"{header}. Point --tag-output at a fresh file."
                 )
+            # Keep only rows with real tag content, deduped by filename (last
+            # wins). Blank rows from a failed attempt are dropped so the file
+            # is retried; dedup prevents a re-run from doubling a filename.
+            kept: dict[str, list] = {}
             for row in reader:
-                if row:
-                    processed.add(row[0])
+                if row and any(cell.strip() for cell in row[1:]):
+                    kept[row[0]] = row
+        processed = set(kept)
+        # Rewrite the cleaned CSV atomically before appending new rows.
+        tmp = f"{output_csv}.tmp"
+        with open(tmp, "w", newline="") as wf:
+            w = csv.writer(wf)
+            w.writerow(header)
+            w.writerows(kept.values())
+        os.replace(tmp, output_csv)
 
     with open(output_csv, 'a', newline='') as f:
         writer = csv.writer(f)
@@ -462,9 +474,10 @@ def run_tagging(
             try:
                 temp_dir = extract_to_temp(path)
                 if not temp_dir or not is_valid_archive_content(temp_dir):
-                    print(f"Skipping {path.name} — invalid content")
-                    writer.writerow(make_row(path.name))
-                    processed.add(path.name)
+                    # Not written to the CSV, so a re-run retries it (e.g. an
+                    # extractor was missing or the archive was re-downloaded).
+                    print(f"Skipping {path.name} — could not extract / no valid content (will retry on re-run)")
+                    logging.warning(f"No valid content for {path.name} (not written; retry on re-run)")
                     continue
 
                 # Put the base name (stem) of the file at the front, then add all contained names
@@ -519,10 +532,8 @@ def run_tagging(
                     metadatas = [None] * len(documents)
 
                 if not documents:
-                    print(f"Skipping {path.name} — no lore found in vector DB")
-                    logging.warning(f"No lore retrieved for {path.name}")
-                    writer.writerow(make_row(path.name))
-                    processed.add(path.name)
+                    print(f"Skipping {path.name} — no lore found in vector DB (will retry on re-run)")
+                    logging.warning(f"No lore retrieved for {path.name} (not written; retry on re-run)")
                     continue
 
                 if rerank:
@@ -557,10 +568,10 @@ def run_tagging(
                 )
 
                 def fallback():
-                    print(f"[Fallback] Generation failed for {path.name}. Using Chroma document snippets.")
-                    logging.warning(f"Fallback to Chroma for {path.name}")
-                    writer.writerow(make_row(path.name, tags=[d[:50] for d in documents[:5]]))
-                    processed.add(path.name)
+                    # Generation failed (API error / "unknown"). Don't write a
+                    # row so the file is retried on the next run.
+                    print(f"[Retry on re-run] Generation failed for {path.name}")
+                    logging.warning(f"Generation failed for {path.name} (not written; retry on re-run)")
 
                 if provider == "anthropic":
                     # Schema-enforced: the record is guaranteed to match `schema`
@@ -588,10 +599,10 @@ def run_tagging(
                 print(f"Tagged {path.name} [{provider}] using {token_count} tokens")
                 logging.info(f"Tagged {path.name} | Tokens: {token_count} | {provider}")
             except Exception as e:
-                print(f"Error processing {path.name}: {e}")
+                # Unexpected failure — leave the file out of the CSV so a
+                # re-run retries it rather than stranding a blank row.
+                print(f"Error processing {path.name} (will retry on re-run): {e}")
                 logging.error(f"Tagging failed for {path.name}: {e}")
-                writer.writerow(make_row(path.name))
-                processed.add(path.name)
             finally:
                 if temp_dir:
                     shutil.rmtree(temp_dir, ignore_errors=True)
