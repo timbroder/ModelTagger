@@ -62,7 +62,11 @@ def _add_tag_opts(p):
     p.add_argument('--zips', required=True, help='Path to folder of ZIPs/STLs to tag')
     p.add_argument('--tag-output', help='Output CSV for tag results (default: preset tag_output)')
     p.add_argument('--prompt-override', help='Custom tag prompt (replaces the preset prompt)')
-    p.add_argument('--model', default='gpt-4o', help='OpenAI model to use when not local')
+    p.add_argument('--provider', choices=['anthropic', 'openai', 'local'], default='anthropic',
+                   help='Tagging backend (default: anthropic, with schema-enforced output). '
+                        '--use-local forces local.')
+    p.add_argument('--model', help='Model for the chosen provider '
+                                   '(default: claude-sonnet-4-6 for anthropic, gpt-4o for openai)')
     p.add_argument('--local-model', default='llama3.1:8b-instruct', help='Ollama model name')
     p.add_argument('--rerank', action='store_true', help='Rerank search results with cross-encoder')
     p.add_argument('--rerank-model', default='BAAI/bge-reranker-base', help='Cross-encoder model')
@@ -156,6 +160,7 @@ def main():
             token_budget=args.token_budget,
             rerank=args.rerank,
             rerank_model=args.rerank_model,
+            provider=args.provider,
         )
 
     if args.step == 'upload':

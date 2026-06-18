@@ -40,13 +40,14 @@ You provide two inputs that are not checked in:
 ## 🛠 Setup
 
 ```bash
-pip install -r requirements.txt        # OpenAI mode
+pip install -r requirements.txt        # core (Anthropic + OpenAI tagging)
 pip install -r requirements-local.txt  # + local mode (SentenceTransformers, reranker)
 ```
 
-OpenAI mode requires `OPENAI_API_KEY` in your environment (used for tag
-*generation*; embeddings always run locally — Chroma's built-in model by
-default, or a SentenceTransformer with `--use-local`).
+Tag *generation* needs an API key for the chosen `--provider`:
+`ANTHROPIC_API_KEY` (default) or `OPENAI_API_KEY`. Embeddings always run
+locally — Chroma's built-in model by default, or a SentenceTransformer with
+`--use-local` — so no key is needed for scrape/embed.
 
 ---
 
@@ -151,8 +152,21 @@ layout are not deleted).
 ### 3. Tag Miniature Files
 
 ```bash
-python src/main.py tag --zips data/zips --mode warhammer --model gpt-4o
+python src/main.py tag --zips data/zips --mode warhammer   # Anthropic (default)
 ```
+
+The tagging backend is chosen with `--provider`:
+
+| `--provider` | Model | Env | Notes |
+|---|---|---|---|
+| `anthropic` (default) | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | **Schema-enforced** structured output — `faction`/`role`/etc. are JSON enums the model can't deviate from |
+| `openai` | `gpt-4o` | `OPENAI_API_KEY` | JSON requested in the prompt, parsed defensively |
+| `local` | Ollama (`--local-model`) | — | Same as `--use-local` |
+
+Override the model with `--model` (e.g. `--model claude-opus-4-8` for the
+strongest subfaction accuracy). The cost across a whole library is dominated
+by the number of minis, not the model — a few tens of dollars even on Opus —
+so pick for quality.
 
 For each archive/file: extracts it, validates the contents (must contain a
 3D model or image; archives with executables are skipped), cleans the
@@ -164,12 +178,19 @@ to a pure semantic query — and asks the LLM for tags within
 at 2 chunks per page so one article can't crowd out the rest.
 
 The LLM returns a **structured JSON record** so models can be organized
-consistently — for warhammer mode: `faction` (normalized to a canonical
-~25-faction vocabulary, so "Sisters of Battle" always lands as
-"Adepta Sororitas"), `subfaction`, `unit`, `model_type`, `role`
-(battlefield role), `allegiance` (Imperium/Chaos/Xenos), `equipment`, plus
-free-form `tags`. D&D mode uses creature/creature_type/size/class/alignment.
-Fields the model can't determine stay empty rather than guessed.
+consistently — for warhammer mode: `faction` (a canonical ~25-faction
+vocabulary, so "Sisters of Battle" always lands as "Adepta Sororitas"),
+`subfaction`, `unit`, `model_type`, `role` (battlefield role), `allegiance`
+(Imperium/Chaos/Xenos), `equipment`, plus free-form `tags`. D&D mode uses
+creature/creature_type/size/class/alignment. Fields the model can't
+determine stay empty rather than guessed.
+
+The field schema (including the enum vocabularies) lives in each preset in
+`config/tagging_presets.json` and is the source of truth for the CSV
+columns. With `--provider anthropic`, that schema is sent to the API as a
+**hard constraint** — `faction`/`model_type`/`role`/`allegiance` can only
+ever be one of their allowed values, so the taxonomy is guaranteed at the
+API level rather than hoped for in a prompt.
 
 - Results append to the `--tag-output` CSV with one column per field
   (default: the preset's `tag_output`, e.g. `tags-warhammer.csv`);

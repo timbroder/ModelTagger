@@ -1,0 +1,168 @@
+import csv
+import json
+import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+sys.path.append('src')
+
+WH_FIELDS = ["faction", "subfaction", "unit", "model_type", "role", "allegiance", "equipment"]
+
+
+@pytest.fixture(autouse=True)
+def _reset_client():
+    import tagging
+    tagging._anthropic_client = None
+    yield
+    tagging._anthropic_client = None
+
+
+def _fake_response(record: dict, in_tokens=100, out_tokens=40):
+    block = MagicMock()
+    block.type = "text"
+    block.text = json.dumps(record)
+    resp = MagicMock()
+    resp.content = [block]
+    resp.usage.input_tokens = in_tokens
+    resp.usage.output_tokens = out_tokens
+    return resp
+
+
+def test_build_schema_permissive():
+    from tagging import build_schema
+    s = build_schema(["a", "b"])
+    assert s["properties"]["a"] == {"type": "string"}
+    assert s["properties"]["tags"]["type"] == "array"
+    assert s["required"] == ["a", "b", "tags"]
+    assert s["additionalProperties"] is False
+
+
+def test_normalize_record_lists_and_unknowns():
+    from tagging import normalize_record
+    rec = {
+        "faction": "Space Marines",
+        "role": "unknown",
+        "equipment": ["Servo-arm", "Power Armour"],
+        "tags": ["Primaris", " "],
+    }
+    out = normalize_record(rec, WH_FIELDS)
+    assert out["faction"] == "Space Marines"
+    assert out["role"] == ""               # "unknown" -> empty
+    assert out["equipment"] == "Servo-arm, Power Armour"
+    assert out["tags"] == ["Primaris"]
+
+
+def test_ask_anthropic_returns_guaranteed_record():
+    from tagging import ask_anthropic
+    record = {"faction": "Orks", "tags": ["Waaagh"]}
+    client = MagicMock()
+    client.messages.create.return_value = _fake_response(record)
+    with patch("tagging.get_anthropic_client", return_value=client):
+        out, tokens = ask_anthropic("prompt", {"type": "object"}, model="claude-sonnet-4-6")
+    assert out == record
+    assert tokens == 140
+    # The schema was passed via output_config (structured output enforcement)
+    kwargs = client.messages.create.call_args.kwargs
+    assert kwargs["output_config"]["format"]["type"] == "json_schema"
+    assert kwargs["model"] == "claude-sonnet-4-6"
+
+
+def test_ask_anthropic_returns_none_on_failure(monkeypatch):
+    from tagging import ask_anthropic
+    monkeypatch.setattr("tagging.time.sleep", lambda s: None)
+    client = MagicMock()
+    client.messages.create.side_effect = RuntimeError("boom")
+    with patch("tagging.get_anthropic_client", return_value=client):
+        out, tokens = ask_anthropic("p", {}, retries=2)
+    assert out is None and tokens == 0
+
+
+def _run_tag_anthropic(tmp_path, record, filename="Wolfspear+Techmarine.stl",
+                       query_return=None):
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / filename).write_text("mesh")
+    out_csv = tmp_path / "tags.csv"
+
+    if query_return is None:
+        query_return = {
+            "documents": [["Wolfspear - lore"]],
+            "distances": [[0.3]],
+            "metadatas": [[{"source": "u", "title": "Wolfspear", "categories": "Space Wolves"}]],
+        }
+    mock_col = MagicMock()
+    mock_col.query.return_value = query_return
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+
+    client = MagicMock()
+    client.messages.create.return_value = _fake_response(record)
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.get_anthropic_client", return_value=client), \
+            patch("tagging.count_tokens", side_effect=lambda text, model=None: len(text) // 4):
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(tmp_path / "db"), None, "warhammer",
+                    provider="anthropic")
+    return out_csv, client
+
+
+def test_run_tagging_anthropic_writes_schema_columns(tmp_path):
+    record = {
+        "faction": "Space Marines", "subfaction": "Wolfspear", "unit": "Techmarine",
+        "model_type": "Infantry", "role": "Elites", "allegiance": "Imperium",
+        "equipment": ["Servo-arm"], "tags": ["Primaris"],
+    }
+    out_csv, client = _run_tag_anthropic(tmp_path, record)
+
+    rows = list(csv.reader(open(out_csv)))
+    assert rows[0] == ["filename"] + WH_FIELDS + ["tags"]
+    row = dict(zip(rows[0], rows[1]))
+    assert row["faction"] == "Space Marines"
+    assert row["subfaction"] == "Wolfspear"
+    assert row["equipment"] == "Servo-arm"
+    assert row["tags"] == "Primaris"
+
+    # The enum-constrained schema (faction enum) was sent to the API
+    schema = client.messages.create.call_args.kwargs["output_config"]["format"]["schema"]
+    assert "Adepta Sororitas" in schema["properties"]["faction"]["enum"]
+
+
+def test_run_tagging_anthropic_fallback_on_none(tmp_path):
+    # ask_anthropic failing -> fallback row with empty structured fields
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "m.stl").write_text("mesh")
+    out_csv = tmp_path / "tags.csv"
+    mock_col = MagicMock()
+    mock_col.query.return_value = {
+        "documents": [["lore"]], "distances": [[0.3]], "metadatas": [[{"source": "u"}]],
+    }
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+
+    client = MagicMock()
+    client.messages.create.side_effect = RuntimeError("boom")
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.get_anthropic_client", return_value=client), \
+            patch("tagging.time.sleep", lambda s: None), \
+            patch("tagging.count_tokens", side_effect=lambda text, model=None: len(text) // 4):
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(tmp_path / "db"), None, "warhammer",
+                    provider="anthropic")
+
+    rows = list(csv.reader(open(out_csv)))
+    assert rows[1][0] == "m.stl"
+    # tags column carries fallback snippets; structured fields empty
+    assert all(c == "" for c in rows[1][1:-1])
+
+
+def test_fields_derived_from_schema(tmp_path):
+    # Even if a preset's "fields" drifted, schema property order drives columns
+    record = {f: "x" for f in WH_FIELDS}
+    record["equipment"] = []
+    record["tags"] = []
+    out_csv, _ = _run_tag_anthropic(tmp_path, record)
+    header = next(csv.reader(open(out_csv)))
+    assert header == ["filename"] + WH_FIELDS + ["tags"]
