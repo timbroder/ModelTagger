@@ -13,7 +13,7 @@ import patoolib
 from tqdm import tqdm
 
 from manyfold import ManyfoldClient, ManyfoldError, model_tags
-from utils import slugify
+from utils import slugify, clean_file_name, filter_query_tokens
 
 # Structured fields owned by this pipeline across all modes — namespaced tags
 # with these prefixes are replaced on re-runs; everything else (manual tags
@@ -71,16 +71,15 @@ def merge_tags(existing: list[str], new: list[str]) -> list[str]:
 
 
 def normalize_name(name: str) -> str:
-    """Normalize a filename or Manyfold model name for matching. Dedupes
-    repeated words — vendors often name files Name_Name+variant, and Manyfold
-    derives a shorter model name, so the two only line up after dedupe."""
-    slug = slugify(Path(name).stem.replace("+", " ").replace("_", " "))
-    seen, parts = set(), []
-    for tok in slug.split("-"):
-        if tok and tok not in seen:
-            seen.add(tok)
-            parts.append(tok)
-    return "-".join(parts)
+    """Normalize a filename or Manyfold model name for matching.
+
+    Applies the same cleaning the tagging step uses (strip dates, print-farm
+    junk, digit suffixes) and dedupes repeated words — so a vendor filename
+    like 'space-mongol-blade-master20210330-8016-1n0lirn' matches the model
+    Manyfold derives ('Space Mongol Blade Master'), and 'Name_Name+variant'
+    matches 'Name'."""
+    cleaned = clean_file_name(Path(name).stem.replace("+", " ").replace("_", " "))
+    return "-".join(t.lower() for t in filter_query_tokens(cleaned.split()))
 
 
 def match_model(filename: str, models_by_slug: dict[str, dict]) -> dict | None:

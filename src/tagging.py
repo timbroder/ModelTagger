@@ -14,7 +14,7 @@ import time
 import logging
 import re
 import requests
-from utils import slugify
+from utils import slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS
 
 # Resolve config relative to the repo root so the CLI works from any cwd
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -77,46 +77,6 @@ def is_valid_archive_content(folder: Path) -> bool:
         if f.suffix.lower() in bad_exts:
             return False
     return any(f.suffix.lower() in allowed_exts for f in files)
-
-
-def clean_file_name(name: str) -> str:
-    """Remove dates, timestamps, and symbols from a filename stem."""
-    name = re.sub(r"\d{4}[-_\.]\d{2}[-_\.]\d{2}", " ", name)  # YYYY-MM-DD or similar
-    name = re.sub(r"\d{2}[-_\.]\d{2}[-_\.]\d{4}", " ", name)  # DD-MM-YYYY or MM-DD-YYYY
-    name = re.sub(r"\d{8,14}", " ", name)  # Compact dates or timestamps
-    name = re.sub(r"\b(19|20)\d{2}\b", " ", name)  # Year alone
-    name = re.sub(r"[^0-9a-zA-Z]+", " ", name)  # Replace symbols with spaces
-    return re.sub(r"\s+", " ", name).strip()
-
-# Tokens that describe print files rather than the miniature subject
-_JUNK_TOKENS = {
-    "supported", "presupported", "unsupported", "presup", "sup", "supports",
-    "support", "base", "bases", "body", "bodies", "head", "heads", "arm",
-    "arms", "leg", "legs", "left", "right", "part", "parts", "bits", "bit",
-    "stl", "obj", "lys", "chitubox", "lychee", "final", "fixed", "repaired",
-    "hollow", "hollowed", "solid", "raw", "merged", "split", "cut", "uncut",
-    "version", "copy", "new", "old", "test", "print", "prints", "file", "files",
-}
-
-
-def filter_query_tokens(words: list[str]) -> list[str]:
-    """Drop filename tokens that carry no lore signal: print-prep words,
-    anything with digits (versions, dates, print-farm suffixes), and
-    fragments. Deduplicates case-insensitively, preserving order."""
-    out: list[str] = []
-    seen: set[str] = set()
-    for w in words:
-        lw = w.lower()
-        if lw in _JUNK_TOKENS:
-            continue
-        if any(ch.isdigit() for ch in w):
-            continue
-        if len(w) <= 2:
-            continue
-        if lw not in seen:
-            seen.add(lw)
-            out.append(w)
-    return out
 
 
 def candidate_slugs(words: list[str]) -> list[str]:
