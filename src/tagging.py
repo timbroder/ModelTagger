@@ -153,10 +153,14 @@ def related_pages_block(metadatas: list[dict | None]) -> str:
     return "Related wiki pages:\n" + "\n".join(lines) + "\n\n"
 
 
-# Above this best-match cosine distance the retrieved context is probably
+# Above this best-match cosine distance an UNFILTERED retrieval is probably
 # unrelated (third-party minis with no wiki page) — warn the LLM rather than
-# let it weave noise into the tags
-_WEAK_CONTEXT_DISTANCE = 0.55
+# let it weave noise into the tags. Tuned to the default MiniLM embedder,
+# whose distances run high even for good matches (~0.5-0.8 is common). This
+# guard is NOT applied when the slug filter fired: a slug match means the
+# page name matches the file, so the page is on-topic by construction
+# regardless of embedding distance.
+_WEAK_CONTEXT_DISTANCE = 0.8
 _WEAK_CONTEXT_NOTE = (
     "Note: the lore context below was only a weak match for this file name. "
     "Ignore it unless it is clearly about this miniature; otherwise rely on "
@@ -554,13 +558,16 @@ def run_tagging(
                 # signal), falling back to an unfiltered semantic query.
                 slugs = candidate_slugs(base_words)
                 results = None
+                slug_filtered = False
                 if slugs:
                     results = collection.query(
                         query_texts=[query_text],
                         n_results=20,
                         where={"slug": {"$in": slugs}},
                     )
-                    if not results["documents"][0]:
+                    if results["documents"][0]:
+                        slug_filtered = True
+                    else:
                         results = None
                 if results is None:
                     results = collection.query(query_texts=[query_text], n_results=20)
@@ -583,7 +590,14 @@ def run_tagging(
                 else:
                     confident_docs = select_context_docs(documents, distances, metadatas)
 
-                context_note = _WEAK_CONTEXT_NOTE if distances[0] > _WEAK_CONTEXT_DISTANCE else ""
+                # Only warn about weak context on the unfiltered path — a slug
+                # match means the page is on-topic by name, so trust its lore
+                # even when the embedding distance is high.
+                context_note = (
+                    _WEAK_CONTEXT_NOTE
+                    if not slug_filtered and distances[0] > _WEAK_CONTEXT_DISTANCE
+                    else ""
+                )
                 related = related_pages_block([m for _, m in confident_docs])
 
                 # cl100k token counts are approximate for non-OpenAI models, but
