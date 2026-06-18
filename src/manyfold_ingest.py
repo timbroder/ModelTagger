@@ -160,7 +160,7 @@ def run_upload(
         token=os.getenv("MANYFOLD_API_TOKEN"),
         client_id=os.getenv("MANYFOLD_CLIENT_ID"),
         client_secret=os.getenv("MANYFOLD_CLIENT_SECRET"),
-        scopes=os.getenv("MANYFOLD_SCOPES", "read write"),
+        scopes=os.getenv("MANYFOLD_SCOPES", "public read write"),
     )
 
     if check:

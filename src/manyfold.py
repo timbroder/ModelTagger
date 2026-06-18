@@ -68,7 +68,7 @@ class ManyfoldClient:
         token: str | None = None,
         client_id: str | None = None,
         client_secret: str | None = None,
-        scopes: str = "read write",
+        scopes: str = "public read write",
         min_interval: float = 0.25,
     ):
         # REST resources and /oauth/token live at the root; only the docs are

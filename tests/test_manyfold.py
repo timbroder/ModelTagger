@@ -117,6 +117,14 @@ def test_oauth_uses_configured_scope_and_root_token_url():
     assert mock_post.call_args.kwargs["data"]["scope"] == "read write"
 
 
+def test_oauth_default_scope_includes_public():
+    # GET /models requires ["public","read"]; the default must include public
+    client = ManyfoldClient("https://mf.example", client_id="c", client_secret="s", min_interval=0)
+    with patch("manyfold.requests.post", return_value=_resp(200, {"access_token": "T"})) as mock_post:
+        client._ensure_token()
+    assert mock_post.call_args.kwargs["data"]["scope"] == "public read write"
+
+
 def test_oauth_404_gives_actionable_error():
     client = ManyfoldClient("https://mf.example/api", client_id="c", client_secret="s", min_interval=0)
     with patch("manyfold.requests.post", return_value=_resp(404, {})):
