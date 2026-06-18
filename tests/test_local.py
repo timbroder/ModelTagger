@@ -110,7 +110,8 @@ def test_local_generation(tmp_path, monkeypatch):
     assert urls[1].endswith("/api/generate")
 
     rows = list(csv.reader(open(out_csv)))
-    assert rows[1][-1].replace(" ", "") == "tag1,tag2"
+    # tags are title-cased during cleanup
+    assert rows[1][-1].replace(" ", "") == "Tag1,Tag2"
 
 
 def test_rerank(tmp_path, monkeypatch):

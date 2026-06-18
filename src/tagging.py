@@ -204,11 +204,87 @@ _WEAK_CONTEXT_NOTE = (
 )
 
 
+# Tag values that are print/file metadata or trivially universal — never lore.
+# (_JUNK_TOKENS already covers single print-prep words; these are phrases.)
+_TAG_STOPWORDS = {
+    "warhammer 40k", "warhammer 40000", "warhammer", "40k", "miniature", "mini",
+    "miniatures", "3d print", "3d printable", "3d model", "stl", "obj",
+    "custom sculpt", "sculpt", "fan made", "fan-made", "proxy", "tabletop",
+    "wargaming", "wargame", "model", "figure", "figurine", "resin", "pre-supported",
+    "multi-part model", "multi-part", "multipart", "multi part", "single piece",
+    "single-piece", "highly detailed", "high detail",
+}
+
+_SMALL_WORDS = {"of", "the", "and", "a", "an", "in", "on", "for", "to", "with", "or"}
+
+
+def titlecase_tag(t: str) -> str:
+    """Capitalize each word's first letter (leaving the rest as-is so
+    'Mechanicus' / 'McGuffin' survive), lowercasing small connector words."""
+    words = t.split()
+    out = []
+    for i, w in enumerate(words):
+        if i > 0 and w.lower() in _SMALL_WORDS:
+            out.append(w.lower())
+        elif w[:1].isalpha():
+            out.append(w[:1].upper() + w[1:])
+        else:
+            out.append(w)
+    return " ".join(out)
+
+
+def _dedupe_substrings(items: list[str]) -> list[str]:
+    """Drop an item whose words appear as a contiguous run inside another item
+    (e.g. drop 'Claws' when 'Oversized Claws' is present)."""
+    result = []
+    for i, it in enumerate(items):
+        pad = f" {it.lower()} "
+        if any(j != i and pad in f" {items[j].lower()} " for j in range(len(items))):
+            continue
+        result.append(it)
+    return result
+
+
+def clean_equipment(value: str) -> str:
+    """Title-case, case-insensitively dedupe, and drop redundant substrings
+    from a comma-joined equipment string."""
+    items, seen = [], set()
+    for part in value.split(","):
+        p = titlecase_tag(part.strip())
+        if p and p.lower() not in seen:
+            seen.add(p.lower())
+            items.append(p)
+    return ", ".join(_dedupe_substrings(items))
+
+
+def clean_tags(tags: list[str], field_values: list[str]) -> list[str]:
+    """Drop tags that duplicate a structured field or are print/file metadata,
+    normalize casing, and dedupe — so the tag cloud stays clean and lore-only."""
+    taken: set[str] = set()
+    for v in field_values:
+        for part in str(v).split(","):
+            p = part.strip().lower()
+            if p:
+                taken.add(p)
+    out, seen = [], set()
+    for t in tags:
+        t = " ".join(str(t).split())  # collapse whitespace
+        low = t.lower()
+        if not t or low in taken or low in _TAG_STOPWORDS or low in _JUNK_TOKENS:
+            continue
+        title = titlecase_tag(t)
+        if title.lower() not in seen:
+            seen.add(title.lower())
+            out.append(title)
+    return out
+
+
 def normalize_record(data: dict, fields: list[str]) -> dict:
     """Coerce a tag dict into {field: str, "tags": [str]} for CSV output.
 
-    List-valued fields (e.g. equipment) become comma strings; "unknown"-like
-    values become empty strings; the tags array is cleaned.
+    List-valued fields become comma strings; "unknown"-like values become
+    empty; equipment is deduped/title-cased; tags are stripped of field
+    duplicates and print/file metadata and normalized.
     """
     out: dict = {}
     for f in fields:
@@ -216,11 +292,15 @@ def normalize_record(data: dict, fields: list[str]) -> dict:
         if isinstance(v, list):
             v = ", ".join(str(x).strip() for x in v if str(x).strip())
         v = str(v).strip()
-        out[f] = "" if v.lower() in ("unknown", "none", "n/a", "null") else v
+        v = "" if v.lower() in ("unknown", "none", "n/a", "null") else v
+        if f == "equipment" and v:
+            v = clean_equipment(v)
+        out[f] = v
     tags = data.get("tags", [])
     if isinstance(tags, str):
         tags = parse_tags(tags)
-    out["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+    tags = [str(t).strip() for t in tags if str(t).strip()]
+    out["tags"] = clean_tags(tags, [out[f] for f in fields])
     return out
 
 
@@ -239,7 +319,7 @@ def parse_structured(raw: str, fields: list[str]) -> dict:
             data = None
         if isinstance(data, dict):
             return normalize_record(data, fields)
-    return {**{f: "" for f in fields}, "tags": parse_tags(raw)}
+    return normalize_record({"tags": parse_tags(raw)}, fields)
 
 
 def build_schema(fields: list[str]) -> dict:
