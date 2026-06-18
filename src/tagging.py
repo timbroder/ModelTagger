@@ -19,8 +19,15 @@ from utils import slugify
 # Resolve config relative to the repo root so the CLI works from any cwd
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
-# Lazy-initialized OpenAI client
+# Default models per provider when --model is not given
+_DEFAULT_MODELS = {
+    "openai": "gpt-4o",
+    "anthropic": "claude-sonnet-4-6",
+}
+
+# Lazy-initialized API clients
 _openai_client = None
+_anthropic_client = None
 
 
 def get_openai_client():
@@ -29,6 +36,15 @@ def get_openai_client():
     if _openai_client is None:
         _openai_client = OpenAI()
     return _openai_client
+
+
+def get_anthropic_client():
+    """Get or create the Anthropic client (lazy initialization)."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic()
+    return _anthropic_client
 
 def extract_to_temp(file_path: Path) -> Path | None:
     """Extract archive contents to a temporary directory."""
@@ -188,11 +204,32 @@ _WEAK_CONTEXT_NOTE = (
 )
 
 
-def parse_structured(raw: str, fields: list[str]) -> dict:
-    """Parse the LLM's JSON tag object into {field: str, "tags": [str]}.
+def normalize_record(data: dict, fields: list[str]) -> dict:
+    """Coerce a tag dict into {field: str, "tags": [str]} for CSV output.
 
-    Falls back to treating the response as a flat tag list when no valid
-    JSON object is found. "unknown"-like values become empty strings.
+    List-valued fields (e.g. equipment) become comma strings; "unknown"-like
+    values become empty strings; the tags array is cleaned.
+    """
+    out: dict = {}
+    for f in fields:
+        v = data.get(f, "")
+        if isinstance(v, list):
+            v = ", ".join(str(x).strip() for x in v if str(x).strip())
+        v = str(v).strip()
+        out[f] = "" if v.lower() in ("unknown", "none", "n/a", "null") else v
+    tags = data.get("tags", [])
+    if isinstance(tags, str):
+        tags = parse_tags(tags)
+    out["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+    return out
+
+
+def parse_structured(raw: str, fields: list[str]) -> dict:
+    """Parse an LLM's free-text JSON tag object into {field: str, "tags": [str]}.
+
+    Used for providers without schema-enforced output (OpenAI/Ollama). Falls
+    back to treating the response as a flat tag list when no valid JSON object
+    is found.
     """
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if m:
@@ -201,19 +238,48 @@ def parse_structured(raw: str, fields: list[str]) -> dict:
         except json.JSONDecodeError:
             data = None
         if isinstance(data, dict):
-            out: dict = {}
-            for f in fields:
-                v = data.get(f, "")
-                if isinstance(v, list):
-                    v = ", ".join(str(x).strip() for x in v if str(x).strip())
-                v = str(v).strip()
-                out[f] = "" if v.lower() in ("unknown", "none", "n/a", "null") else v
-            tags = data.get("tags", [])
-            if isinstance(tags, str):
-                tags = parse_tags(tags)
-            out["tags"] = [str(t).strip() for t in tags if str(t).strip()]
-            return out
+            return normalize_record(data, fields)
     return {**{f: "" for f in fields}, "tags": parse_tags(raw)}
+
+
+def build_schema(fields: list[str]) -> dict:
+    """A permissive JSON schema (all string fields) for presets that don't
+    define their own. Real presets ship an enum-constrained schema."""
+    props = {f: {"type": "string"} for f in fields}
+    props["tags"] = {"type": "array", "items": {"type": "string"}}
+    return {
+        "type": "object",
+        "properties": props,
+        "required": fields + ["tags"],
+        "additionalProperties": False,
+    }
+
+
+def ask_anthropic(prompt: str, schema: dict, model: str = "claude-sonnet-4-6",
+                  retries: int = 3) -> tuple[dict | None, int]:
+    """Tag via Anthropic with schema-enforced structured output.
+
+    Returns (record, total_tokens) where record is guaranteed to match
+    ``schema`` (enum fields can only hold allowed values), or (None, 0) on
+    repeated failure so the caller can fall back.
+    """
+    for attempt in range(retries):
+        try:
+            response = get_anthropic_client().messages.create(
+                model=model,
+                max_tokens=512,
+                system="You are a miniature tagging assistant.",
+                messages=[{"role": "user", "content": prompt}],
+                output_config={"format": {"type": "json_schema", "schema": schema}},
+            )
+            text = next((b.text for b in response.content if b.type == "text"), "")
+            tokens = response.usage.input_tokens + response.usage.output_tokens
+            return json.loads(text), tokens
+        except Exception as e:
+            print(f"[Anthropic Retry {attempt + 1}] Error: {e}")
+            if attempt == retries - 1:
+                return None, 0
+            time.sleep(2 ** attempt)
 
 
 def get_tokenizer(model: str):
@@ -317,19 +383,39 @@ def run_tagging(
     mode: str,
     use_local: bool = False,
     local_model: str = "llama3.1:8b-instruct",
-    model: str = "gpt-4o",
+    model: str | None = None,
     token_budget: int = 3000,
     rerank: bool = False,
     rerank_model: str = "BAAI/bge-reranker-base",
+    provider: str = "anthropic",
 ) -> None:
-    """Tag 3D model files using RAG with lore from the vector database."""
+    """Tag 3D model files using RAG with lore from the vector database.
+
+    provider: "anthropic" (schema-enforced structured output), "openai", or
+    "local" (Ollama). use_local=True forces "local" for backward compatibility.
+    """
+    if use_local:
+        provider = "local"
     logging.basicConfig(filename='tagging.log', level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
     with open(_CONFIG_DIR / "tagging_presets.json") as f:
         presets = json.load(f)[mode]
 
     vector_db_path = vector_db_path or presets["vector_db"]
     prompt = prompt_override or presets["prompt"]
-    fields = presets.get("fields", [])
+
+    # The schema is the source of truth for the output fields when present.
+    if presets.get("schema"):
+        schema = presets["schema"]
+        fields = [k for k in schema["properties"] if k != "tags"]
+    else:
+        fields = presets.get("fields", [])
+        schema = build_schema(fields)
+
+    if provider == "local":
+        chosen_model = local_model
+    else:
+        chosen_model = model or _DEFAULT_MODELS[provider]
+
     header = ["filename"] + fields + ["tags"]
 
     def make_row(filename: str, parsed: dict | None = None, tags: list | None = None) -> list:
@@ -449,13 +535,14 @@ def run_tagging(
                 context_note = _WEAK_CONTEXT_NOTE if distances[0] > _WEAK_CONTEXT_DISTANCE else ""
                 related = related_pages_block([m for _, m in confident_docs])
 
-                chosen_model = local_model if use_local else model
-                prompt_tokens = count_tokens(prompt + context_note + related, model=chosen_model)
+                # cl100k token counts are approximate for non-OpenAI models, but
+                # this is only the context-budget gate, not billing — close enough.
+                prompt_tokens = count_tokens(prompt + context_note + related)
                 context_budget = token_budget - prompt_tokens - 300
                 current = 0
                 context_chunks = []
                 for doc, _ in confident_docs:
-                    t = count_tokens(doc, model=chosen_model)
+                    t = count_tokens(doc)
                     if current + t > context_budget:
                         break
                     context_chunks.append(doc)
@@ -469,28 +556,37 @@ def run_tagging(
                     f"Lore context follows until the end of this message:\n{context}\n\n"
                 )
 
-                if use_local:
-                    tags = ask_local_model(full_prompt, local_model)
-                    token_count = prompt_tokens + count_tokens(tags, model=chosen_model)
-                else:
-                    tags, token_count = ask_openai(full_prompt, model=model)
-
-                if tags.strip().lower() == "unknown":
+                def fallback():
                     print(f"[Fallback] Generation failed for {path.name}. Using Chroma document snippets.")
                     logging.warning(f"Fallback to Chroma for {path.name}")
-                    writer.writerow(make_row(path.name, tags=[doc[:50] for doc in documents[:5]]))
+                    writer.writerow(make_row(path.name, tags=[d[:50] for d in documents[:5]]))
                     processed.add(path.name)
-                    continue
 
-                parsed = parse_structured(tags, fields)
+                if provider == "anthropic":
+                    # Schema-enforced: the record is guaranteed to match `schema`
+                    record, token_count = ask_anthropic(full_prompt, schema, model=chosen_model)
+                    if record is None:
+                        fallback()
+                        continue
+                    parsed = normalize_record(record, fields)
+                elif provider == "local":
+                    raw = ask_local_model(full_prompt, chosen_model)
+                    token_count = prompt_tokens + count_tokens(raw)
+                    if raw.strip().lower() == "unknown":
+                        fallback()
+                        continue
+                    parsed = parse_structured(raw, fields)
+                else:  # openai
+                    raw, token_count = ask_openai(full_prompt, model=chosen_model)
+                    if raw.strip().lower() == "unknown":
+                        fallback()
+                        continue
+                    parsed = parse_structured(raw, fields)
+
                 writer.writerow(make_row(path.name, parsed))
                 processed.add(path.name)
-                if use_local:
-                    print(f"Tagged {path.name} [local] using ~{token_count} tokens")
-                    logging.info(f"Tagged {path.name} | Tokens: {token_count} | local mode")
-                else:
-                    print(f"Tagged {path.name} using {token_count} tokens")
-                    logging.info(f"Tagged {path.name} | Tokens: {token_count}")
+                print(f"Tagged {path.name} [{provider}] using {token_count} tokens")
+                logging.info(f"Tagged {path.name} | Tokens: {token_count} | {provider}")
             except Exception as e:
                 print(f"Error processing {path.name}: {e}")
                 logging.error(f"Tagging failed for {path.name}: {e}")
