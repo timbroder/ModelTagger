@@ -150,6 +150,7 @@ def run_upload(
     dry_run: bool = False,
     limit: int | None = None,
     check: bool = False,
+    delete_source: bool = False,
 ) -> None:
     """Sync a structured tag CSV into Manyfold.
 
@@ -206,7 +207,8 @@ def run_upload(
         collections[key] = created
         return created
 
-    stats = {"tagged": 0, "unchanged": 0, "staged": 0, "missing_source": 0, "errors": 0}
+    stats = {"tagged": 0, "unchanged": 0, "staged": 0, "deleted_source": 0,
+             "missing_source": 0, "errors": 0}
     actions = 0
     staged_any = False
 
@@ -257,10 +259,15 @@ def run_upload(
                     continue
                 actions += 1
                 if dry_run:
-                    print(f"[DRY RUN] would stage {filename} into {library} with {len(tags)} tags")
+                    extra = " then delete source" if delete_source else ""
+                    print(f"[DRY RUN] would stage {filename} into {library} with {len(tags)} tags{extra}")
                 else:
                     stage_into_library(source, library, tags)
                     staged_any = True
+                    # Only remove the source AFTER a successful stage into B.
+                    if delete_source:
+                        source.unlink()
+                        stats["deleted_source"] += 1
                 stats["staged"] += 1
         except Exception as e:
             # One bad archive or API hiccup must not kill a thousands-row sync
@@ -273,8 +280,9 @@ def run_upload(
         else:
             print("No scan endpoint available — trigger a library scan in the Manyfold UI, then re-run upload.")
 
+    deleted = f", {stats['deleted_source']} sources deleted" if delete_source else ""
     print(
         f"Done: {stats['tagged']} updated, {stats['unchanged']} unchanged, "
-        f"{stats['staged']} staged for scan, {stats['missing_source']} missing source, "
+        f"{stats['staged']} staged for scan{deleted}, {stats['missing_source']} missing source, "
         f"{stats['errors']} errors" + (" [dry run]" if dry_run else "")
     )

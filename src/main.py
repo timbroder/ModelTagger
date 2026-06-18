@@ -73,6 +73,9 @@ def _add_upload_opts(p):
                                           '(default: $MANYFOLD_LIBRARY_PATH)')
     p.add_argument('--dry-run', action='store_true', help='Report what would change without writing')
     p.add_argument('--limit', type=int, help='Stop after this many staged/updated models')
+    p.add_argument('--delete-source', action='store_true',
+                   help='Delete each source archive after it is successfully staged into the '
+                        'library (reclaims NAS space; off by default)')
 
 
 def _add_tag_opts(p):
@@ -189,6 +192,7 @@ def main():
             dry_run=args.dry_run,
             limit=args.limit,
             check=args.check,
+            delete_source=args.delete_source,
         )
     elif args.step == 'all' and args.upload:
         print("=== Upload ===")
@@ -198,6 +202,7 @@ def main():
             library_path=args.library_path,
             dry_run=args.dry_run,
             limit=args.limit,
+            delete_source=args.delete_source,
         )
 
 

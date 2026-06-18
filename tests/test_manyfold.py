@@ -292,6 +292,46 @@ def test_run_upload_stages_missing_models_and_scans(tmp_path, monkeypatch):
     client.update_model.assert_not_called()
 
 
+def test_run_upload_delete_source_removes_archive_after_staging(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    src = zips / "Sister Superior.stl"
+    src.write_text("mesh")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "Sister Superior.stl", "faction": "Adepta Sororitas"},
+    ])
+    client = _fake_client()
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library),
+                   delete_source=True)
+
+    assert (library / "Sister Superior" / "datapackage.json").exists()  # staged into B
+    assert not src.exists()                                             # source removed from A
+
+
+def test_run_upload_dry_run_keeps_source_even_with_delete_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    src = zips / "Sister Superior.stl"
+    src.write_text("mesh")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [{"filename": "Sister Superior.stl", "faction": "Adepta Sororitas"}])
+    client = _fake_client()
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library),
+                   delete_source=True, dry_run=True)
+
+    assert src.exists()              # dry run never deletes
+    assert not library.exists()      # and never stages
+
+
 def test_run_upload_dry_run_writes_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
     monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
