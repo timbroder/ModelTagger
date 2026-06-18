@@ -8,6 +8,23 @@ from embed import run_embedding
 from manyfold_ingest import run_upload
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "tagging_presets.json"
+# Repo root holds the project's .env (ANTHROPIC_API_KEY, OPENAI_API_KEY, MANYFOLD_*)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_env() -> None:
+    """Load API keys from a .env file if python-dotenv is installed.
+
+    Looks for a .env in the repo root and in the current working directory.
+    Real environment variables always win (override=False), so an exported
+    key is never clobbered by the file.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(_REPO_ROOT / ".env", override=False)
+    load_dotenv(Path.cwd() / ".env", override=False)  # also pick up a .env in the cwd
 
 
 def load_preset(mode: str) -> dict:
@@ -120,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    load_env()
     args = build_parser().parse_args()
     preset = load_preset(args.mode)
 

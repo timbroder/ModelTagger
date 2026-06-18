@@ -15,6 +15,11 @@ lore
 *.csv
 tools/unique_urls.txt
 
+# Secrets — never commit real keys
+.env
+.env.local
+.env.*.local
+
 # Generated data
 .chroma/
 outputs/

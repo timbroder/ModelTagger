@@ -49,6 +49,10 @@ Tag *generation* needs an API key for the chosen `--provider`:
 locally — Chroma's built-in model by default, or a SentenceTransformer with
 `--use-local` — so no key is needed for scrape/embed.
 
+Keys can live in a **`.env`** file (loaded automatically): copy
+`.env.example` to `.env` and fill it in. Exported environment variables
+always take precedence over the file, and `.env` is gitignored.
+
 ---
 
 ## ⚙️ Usage
