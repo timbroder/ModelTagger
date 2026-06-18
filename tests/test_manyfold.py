@@ -72,6 +72,12 @@ def test_normalize_and_match():
     assert match_model("Sister Superior.zip", models) is None
 
 
+def test_match_dedupes_doubled_filename():
+    # Vendor "Name_Name+variant" pattern must match Manyfold's shorter name
+    models = {normalize_name("Sister Superior"): {"id": 9, "name": "Sister Superior"}}
+    assert match_model("Sister Superior_Sister+Superior.zip", models)["id"] == 9
+
+
 def test_model_tags_shapes():
     assert model_tags({"tags": ["a", "b"]}) == ["a", "b"]
     assert model_tags({"tags": [{"name": "a"}, {"name": "b"}]}) == ["a", "b"]
@@ -168,17 +174,23 @@ def test_client_retries_on_429(monkeypatch):
         assert client.list_models() == []
 
 
-def test_client_update_model_falls_back_to_flat_payload(monkeypatch):
-    monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
+def test_client_update_model_sends_flat_vendor_body():
     client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
-    with patch("manyfold.requests.request", side_effect=[_resp(422), _resp(200)]) as mock_req:
-        client.update_model({"id": 5}, {"tag_list": ["a"]})
-    # Body is serialized to data= with the vendor Content-Type
-    c0, c1 = mock_req.call_args_list[0].kwargs, mock_req.call_args_list[1].kwargs
-    assert json.loads(c0["data"]) == {"model": {"tag_list": ["a"]}}
-    assert json.loads(c1["data"]) == {"tag_list": ["a"]}
-    assert c0["headers"]["Content-Type"] == "application/vnd.manyfold.v0+json"
-    assert c0["headers"]["Accept"] == "application/vnd.manyfold.v0+json"
+    with patch("manyfold.requests.request", return_value=_resp(200)) as mock_req:
+        client.update_model({"@id": "http://localhost:3214/models/5"},
+                            {"keywords": ["a"], "isPartOf": {"@id": "/collections/1"}})
+    c = mock_req.call_args.kwargs
+    # flat JSON-LD body, vendor media type, and the localhost @id rewritten to our host
+    assert json.loads(c["data"]) == {"keywords": ["a"], "isPartOf": {"@id": "/collections/1"}}
+    assert c["headers"]["Content-Type"] == "application/vnd.manyfold.v0+json"
+    assert mock_req.call_args.args[1] == "https://mf.example/models/5"
+
+
+def test_request_rewrites_internal_host():
+    client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
+    with patch("manyfold.requests.request", return_value=_resp(200)) as mock_req:
+        client._request("GET", "http://localhost:3214/models/abc?page=2")
+    assert mock_req.call_args.args[1] == "https://mf.example/models/abc?page=2"
 
 
 # --- staging --------------------------------------------------------------
@@ -217,7 +229,8 @@ def _fake_client(models=None, collections=None):
     client = MagicMock()
     client.list_models.return_value = models or []
     client.list_collections.return_value = collections or []
-    client.create_collection.side_effect = lambda name: {"id": 99, "name": name}
+    client.get_model.side_effect = lambda m: m  # list item == detail in tests
+    client.create_collection.side_effect = lambda name: {"@id": "/collections/99", "name": name}
     client.trigger_scan.return_value = True
     return client
 
@@ -229,16 +242,16 @@ def test_run_upload_updates_existing_model(tmp_path, monkeypatch):
     csv_path = _write_csv(tmp_path, [
         {"filename": "Wolfspear+Techmarine.zip", "faction": "Space Marines", "unit": "Techmarine"},
     ])
-    model = {"id": 1, "name": "Wolfspear Techmarine", "tags": ["painted"]}
+    model = {"id": 1, "name": "Wolfspear Techmarine", "keywords": ["painted"]}
     client = _fake_client(models=[model])
 
     with patch("manyfold_ingest.ManyfoldClient", return_value=client):
         run_upload(str(csv_path))
 
     attributes = client.update_model.call_args.args[1]
-    assert "painted" in attributes["tag_list"]
-    assert "faction: Space Marines" in attributes["tag_list"]
-    assert attributes["collection_id"] == 99
+    assert "painted" in attributes["keywords"]                 # manual tag preserved
+    assert "faction: Space Marines" in attributes["keywords"]
+    assert attributes["isPartOf"] == {"@id": "/collections/99", "@type": "Collection"}
     client.create_collection.assert_called_once_with("Space Marines")
 
 
@@ -248,14 +261,15 @@ def test_run_upload_respects_existing_collection_assignment(tmp_path, monkeypatc
     csv_path = _write_csv(tmp_path, [
         {"filename": "Wolfspear+Techmarine.zip", "faction": "Space Marines"},
     ])
-    model = {"id": 1, "name": "Wolfspear Techmarine", "tags": [], "collection_id": 7}
+    model = {"id": 1, "name": "Wolfspear Techmarine", "keywords": [],
+             "isPartOf": {"@id": "/collections/7", "@type": "Collection"}}
     client = _fake_client(models=[model])
 
     with patch("manyfold_ingest.ManyfoldClient", return_value=client):
         run_upload(str(csv_path))
 
     attributes = client.update_model.call_args.args[1]
-    assert "collection_id" not in attributes
+    assert "isPartOf" not in attributes  # manual collection placement preserved
 
 
 def test_run_upload_stages_missing_models_and_scans(tmp_path, monkeypatch):

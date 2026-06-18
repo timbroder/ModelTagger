@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import time
+from urllib.parse import urlparse
 import requests
 
 # Manyfold's API is content-negotiated on a versioned vendor media type.
@@ -124,7 +125,13 @@ class ManyfoldClient:
         return self._token
 
     def _request(self, method: str, path: str, retries: int = 4, **kwargs) -> requests.Response:
-        url = path if path.startswith("http") else f"{self.base_url}{path}"
+        if path.startswith("http"):
+            # Manyfold returns absolute @id URLs with its INTERNAL host
+            # (e.g. http://localhost:3214/...). Rewrite to our reachable host.
+            p = urlparse(path)
+            url = f"{self.base_url}{p.path}" + (f"?{p.query}" if p.query else "")
+        else:
+            url = f"{self.base_url}{path}"
         headers = kwargs.pop("headers", {})
         headers.setdefault("Accept", _MEDIA_TYPE)
         # Serialize a json body ourselves so we can set the vendor Content-Type
@@ -191,22 +198,30 @@ class ManyfoldClient:
     def list_libraries(self) -> list[dict]:
         return self._paginate("/libraries")
 
+    def get_model(self, model: dict) -> dict:
+        """Fetch a model's detail view (richer than the list item — includes
+        keywords and isPartOf, which the list representation omits)."""
+        resp = self._request("GET", self._resource_path(model, "models"))
+        if not resp.ok:
+            raise ManyfoldError(f"GET model -> HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp.json()
+
     def update_model(self, model: dict, attributes: dict) -> None:
+        # model_request schema is a flat JSON-LD body (keywords, isPartOf, ...)
         path = self._resource_path(model, "models")
-        resp = self._request("PATCH", path, json={"model": attributes})
-        if resp.status_code in (400, 415, 422):
-            # Some API versions accept flat JSON rather than Rails-wrapped
-            resp = self._request("PATCH", path, json=attributes)
+        resp = self._request("PATCH", path, json=attributes)
         if not resp.ok:
             raise ManyfoldError(f"PATCH {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
 
     def set_model_tags(self, model: dict, tags: list[str]) -> None:
-        self.update_model(model, {"tag_list": tags})
+        self.update_model(model, {"keywords": tags})
+
+    def set_model_collection(self, model: dict, collection_id: str) -> None:
+        """Assign a model to a collection via its isPartOf reference."""
+        self.update_model(model, {"isPartOf": {"@id": collection_id, "@type": "Collection"}})
 
     def create_collection(self, name: str) -> dict:
-        resp = self._request("POST", "/collections", json={"collection": {"name": name}})
-        if resp.status_code in (400, 415, 422):
-            resp = self._request("POST", "/collections", json={"name": name})
+        resp = self._request("POST", "/collections", json={"name": name})
         if not resp.ok:
             raise ManyfoldError(f"POST /collections -> HTTP {resp.status_code}: {resp.text[:200]}")
         return resp.json()

@@ -71,8 +71,16 @@ def merge_tags(existing: list[str], new: list[str]) -> list[str]:
 
 
 def normalize_name(name: str) -> str:
-    """Normalize a filename or Manyfold model name for matching."""
-    return slugify(Path(name).stem.replace("+", " ").replace("_", " "))
+    """Normalize a filename or Manyfold model name for matching. Dedupes
+    repeated words — vendors often name files Name_Name+variant, and Manyfold
+    derives a shorter model name, so the two only line up after dedupe."""
+    slug = slugify(Path(name).stem.replace("+", " ").replace("_", " "))
+    seen, parts = set(), []
+    for tok in slug.split("-"):
+        if tok and tok not in seen:
+            seen.add(tok)
+            parts.append(tok)
+    return "-".join(parts)
 
 
 def match_model(filename: str, models_by_slug: dict[str, dict]) -> dict | None:
@@ -212,16 +220,22 @@ def run_upload(
         try:
             model = match_model(filename, models_by_slug)
             if model is not None:
-                merged = merge_tags(model_tags(model), tags)
+                # The list item is minimal; fetch the detail view for the
+                # current keywords + collection (isPartOf), so we honor the
+                # update-owned-keep-manual policy and don't re-assign a
+                # collection the user set by hand.
+                detail = client.get_model(model) if not dry_run else model
+                existing = model_tags(detail)
+                merged = merge_tags(existing, tags)
                 attributes: dict = {}
-                if sorted(merged) != sorted(model_tags(model)):
-                    attributes["tag_list"] = merged
+                if sorted(merged) != sorted(existing):
+                    attributes["keywords"] = merged
                 faction = (row.get("faction") or "").strip()
-                if faction and not model.get("collection") and not model.get("collection_id"):
+                if faction and not detail.get("isPartOf"):
                     coll = ensure_collection(faction)
-                    cid = (coll or {}).get("id")
+                    cid = (coll or {}).get("@id") or (coll or {}).get("id")
                     if cid is not None:
-                        attributes["collection_id"] = cid
+                        attributes["isPartOf"] = {"@id": cid, "@type": "Collection"}
                 if not attributes:
                     stats["unchanged"] += 1
                     continue
