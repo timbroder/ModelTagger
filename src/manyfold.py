@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 import requests
@@ -67,12 +68,17 @@ class ManyfoldClient:
         token: str | None = None,
         client_id: str | None = None,
         client_secret: str | None = None,
+        scopes: str = "read write",
         min_interval: float = 0.25,
     ):
-        self.base_url = base_url.rstrip("/")
+        # REST resources and /oauth/token live at the root; only the docs are
+        # under /api. Tolerate a pasted docs URL by stripping a trailing
+        # /api[/vN] so both auth and resource calls hit the right place.
+        self.base_url = re.sub(r"/api(/v\d+)?/?$", "", base_url.rstrip("/"))
         self._token = token
         self._client_id = client_id
         self._client_secret = client_secret
+        self._scopes = scopes
         self._rate_lock = threading.Lock()
         self._last_request = 0.0
         self._min_interval = min_interval
@@ -87,18 +93,27 @@ class ManyfoldClient:
                 "Set MANYFOLD_API_TOKEN, or MANYFOLD_CLIENT_ID and "
                 "MANYFOLD_CLIENT_SECRET for OAuth client credentials."
             )
+        url = f"{self.base_url}/oauth/token"
         resp = requests.post(
-            f"{self.base_url}/oauth/token",
+            url,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self._client_id,
                 "client_secret": self._client_secret,
-                "scope": "read write",
+                "scope": self._scopes,
             },
             timeout=30,
         )
         if not resp.ok:
-            raise ManyfoldError(f"OAuth token request failed: HTTP {resp.status_code}")
+            detail = resp.text[:300].strip()
+            hint = ""
+            if resp.status_code == 404:
+                hint = (f" — no token endpoint at {url}. Set MANYFOLD_API_URL to the "
+                        "instance root (e.g. https://manyfold.example.net), not the /api docs URL.")
+            elif "invalid_scope" in detail:
+                hint = (f" — the OAuth application doesn't allow scope '{self._scopes}'. "
+                        "Grant it those scopes in Manyfold, or set MANYFOLD_SCOPES to match.")
+            raise ManyfoldError(f"OAuth token request failed: HTTP {resp.status_code}{hint}\n{detail}")
         self._token = resp.json()["access_token"]
         return self._token
 
@@ -204,8 +219,9 @@ class ManyfoldClient:
         return triggered
 
     def openapi_spec(self) -> dict | None:
-        """Fetch the instance's OpenAPI spec (served under /api)."""
-        for path in ("/api/openapi.json", "/api-docs/openapi.json", "/api/spec.json", "/api.json"):
+        """Fetch the instance's OpenAPI spec (Manyfold serves it under /api)."""
+        for path in ("/api/v0/openapi.json", "/api/openapi.json",
+                     "/api-docs/openapi.json", "/api/spec.json", "/api.json"):
             resp = self._request("GET", path)
             if resp.ok:
                 try:

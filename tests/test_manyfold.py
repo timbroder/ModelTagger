@@ -7,7 +7,7 @@ import pytest
 
 sys.path.append('src')
 
-from manyfold import ManyfoldClient, model_tags, _items, _next_link
+from manyfold import ManyfoldClient, ManyfoldError, model_tags, _items, _next_link
 from manyfold_ingest import (
     build_tags,
     merge_tags,
@@ -97,6 +97,47 @@ def _resp(status=200, body=None):
     r.json.return_value = body if body is not None else {}
     r.text = json.dumps(body or {})
     return r
+
+
+def test_base_url_strips_api_docs_suffix():
+    # Pasting the docs URL (…/api) must still resolve resources + oauth at root
+    assert ManyfoldClient("https://mf.example/api").base_url == "https://mf.example"
+    assert ManyfoldClient("https://mf.example/api/v0").base_url == "https://mf.example"
+    assert ManyfoldClient("https://mf.example/api/").base_url == "https://mf.example"
+    assert ManyfoldClient("https://mf.example/").base_url == "https://mf.example"
+
+
+def test_oauth_uses_configured_scope_and_root_token_url():
+    client = ManyfoldClient("https://mf.example/api", client_id="cid",
+                            client_secret="sec", scopes="read write", min_interval=0)
+    with patch("manyfold.requests.post", return_value=_resp(200, {"access_token": "T"})) as mock_post:
+        tok = client._ensure_token()
+    assert tok == "T"
+    assert mock_post.call_args.args[0] == "https://mf.example/oauth/token"  # /api stripped
+    assert mock_post.call_args.kwargs["data"]["scope"] == "read write"
+
+
+def test_oauth_404_gives_actionable_error():
+    client = ManyfoldClient("https://mf.example/api", client_id="c", client_secret="s", min_interval=0)
+    with patch("manyfold.requests.post", return_value=_resp(404, {})):
+        try:
+            client._ensure_token()
+            assert False, "expected ManyfoldError"
+        except ManyfoldError as e:
+            assert "root" in str(e).lower()  # hints to use the instance root URL
+
+
+def test_oauth_invalid_scope_gives_actionable_error():
+    bad = MagicMock(); bad.ok = False; bad.status_code = 400
+    bad.text = '{"error":"invalid_scope","error_description":"..."}'
+    client = ManyfoldClient("https://mf.example", client_id="c", client_secret="s",
+                            scopes="read write delete", min_interval=0)
+    with patch("manyfold.requests.post", return_value=bad):
+        try:
+            client._ensure_token()
+            assert False, "expected ManyfoldError"
+        except ManyfoldError as e:
+            assert "scope" in str(e).lower()
 
 
 def test_client_paginates_and_authenticates():
