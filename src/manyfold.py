@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
 import requests
+
+# Manyfold's API is content-negotiated on a versioned vendor media type.
+# Sending plain application/json routes to the HTML web UI (a Devise login
+# wall), so reads AND writes must use this on Accept (and Content-Type).
+_MEDIA_TYPE = "application/vnd.manyfold.v0+json"
 
 
 class ManyfoldError(RuntimeError):
@@ -120,7 +126,12 @@ class ManyfoldClient:
     def _request(self, method: str, path: str, retries: int = 4, **kwargs) -> requests.Response:
         url = path if path.startswith("http") else f"{self.base_url}{path}"
         headers = kwargs.pop("headers", {})
-        headers.setdefault("Accept", "application/json")
+        headers.setdefault("Accept", _MEDIA_TYPE)
+        # Serialize a json body ourselves so we can set the vendor Content-Type
+        # (requests' json= would force application/json and miss the API).
+        if "json" in kwargs:
+            headers["Content-Type"] = _MEDIA_TYPE
+            kwargs["data"] = json.dumps(kwargs.pop("json"))
         headers["Authorization"] = f"Bearer {self._ensure_token()}"
         last_status = None
         for attempt in range(retries):

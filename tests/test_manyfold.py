@@ -173,8 +173,12 @@ def test_client_update_model_falls_back_to_flat_payload(monkeypatch):
     client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
     with patch("manyfold.requests.request", side_effect=[_resp(422), _resp(200)]) as mock_req:
         client.update_model({"id": 5}, {"tag_list": ["a"]})
-    assert mock_req.call_args_list[0].kwargs["json"] == {"model": {"tag_list": ["a"]}}
-    assert mock_req.call_args_list[1].kwargs["json"] == {"tag_list": ["a"]}
+    # Body is serialized to data= with the vendor Content-Type
+    c0, c1 = mock_req.call_args_list[0].kwargs, mock_req.call_args_list[1].kwargs
+    assert json.loads(c0["data"]) == {"model": {"tag_list": ["a"]}}
+    assert json.loads(c1["data"]) == {"tag_list": ["a"]}
+    assert c0["headers"]["Content-Type"] == "application/vnd.manyfold.v0+json"
+    assert c0["headers"]["Accept"] == "application/vnd.manyfold.v0+json"
 
 
 # --- staging --------------------------------------------------------------
