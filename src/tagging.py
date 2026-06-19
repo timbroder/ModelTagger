@@ -508,10 +508,19 @@ def run_tagging(
         if not file_exists:
             writer.writerow(header)
 
-        for path in Path(zips_dir).iterdir():
+        for path in Path(zips_dir).rglob("*"):
+            if not path.is_file():
+                continue
             if path.suffix.lower() not in [".zip", ".rar", ".7z", ".stl", ".obj", ".png"]:
                 continue
-            if path.name in processed:
+            # Store the path RELATIVE to --zips as the CSV filename: this makes
+            # discovery recursive (nested incoming libraries get tagged) and
+            # collision-free (same-basename archives in different subfolders no
+            # longer overwrite each other's row). upload re-joins it onto --zips
+            # to find the source; match_model/_model_dir_name use the final
+            # component, so naming and matching are unaffected.
+            rel_name = path.relative_to(zips_dir).as_posix()
+            if rel_name in processed:
                 continue
 
             temp_dir = None
@@ -520,8 +529,8 @@ def run_tagging(
                 if not temp_dir or not is_valid_archive_content(temp_dir):
                     # Not written to the CSV, so a re-run retries it (e.g. an
                     # extractor was missing or the archive was re-downloaded).
-                    print(f"Skipping {path.name} — could not extract / no valid content (will retry on re-run)")
-                    logging.warning(f"No valid content for {path.name} (not written; retry on re-run)")
+                    print(f"Skipping {rel_name} — could not extract / no valid content (will retry on re-run)")
+                    logging.warning(f"No valid content for {rel_name} (not written; retry on re-run)")
                     continue
 
                 # Put the base name (stem) of the file at the front, then add all contained names
@@ -579,8 +588,8 @@ def run_tagging(
                     metadatas = [None] * len(documents)
 
                 if not documents:
-                    print(f"Skipping {path.name} — no lore found in vector DB (will retry on re-run)")
-                    logging.warning(f"No lore retrieved for {path.name} (not written; retry on re-run)")
+                    print(f"Skipping {rel_name} — no lore found in vector DB (will retry on re-run)")
+                    logging.warning(f"No lore retrieved for {rel_name} (not written; retry on re-run)")
                     continue
 
                 if rerank:
@@ -624,8 +633,8 @@ def run_tagging(
                 def fallback():
                     # Generation failed (API error / "unknown"). Don't write a
                     # row so the file is retried on the next run.
-                    print(f"[Retry on re-run] Generation failed for {path.name}")
-                    logging.warning(f"Generation failed for {path.name} (not written; retry on re-run)")
+                    print(f"[Retry on re-run] Generation failed for {rel_name}")
+                    logging.warning(f"Generation failed for {rel_name} (not written; retry on re-run)")
 
                 if provider == "anthropic":
                     # Schema-enforced: the record is guaranteed to match `schema`
@@ -648,15 +657,15 @@ def run_tagging(
                         continue
                     parsed = parse_structured(raw, fields)
 
-                writer.writerow(make_row(path.name, parsed))
-                processed.add(path.name)
-                print(f"Tagged {path.name} [{provider}] using {token_count} tokens")
-                logging.info(f"Tagged {path.name} | Tokens: {token_count} | {provider}")
+                writer.writerow(make_row(rel_name, parsed))
+                processed.add(rel_name)
+                print(f"Tagged {rel_name} [{provider}] using {token_count} tokens")
+                logging.info(f"Tagged {rel_name} | Tokens: {token_count} | {provider}")
             except Exception as e:
                 # Unexpected failure — leave the file out of the CSV so a
                 # re-run retries it rather than stranding a blank row.
-                print(f"Error processing {path.name} (will retry on re-run): {e}")
-                logging.error(f"Tagging failed for {path.name}: {e}")
+                print(f"Error processing {rel_name} (will retry on re-run): {e}")
+                logging.error(f"Tagging failed for {rel_name}: {e}")
             finally:
                 if temp_dir:
                     shutil.rmtree(temp_dir, ignore_errors=True)
