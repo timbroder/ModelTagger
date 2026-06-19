@@ -616,6 +616,14 @@ def run_tagging(
                     if not slug_filtered and distances[0] > _WEAK_CONTEXT_DISTANCE
                     else ""
                 )
+                # Record why retrieval went the way it did so sparse output
+                # (e.g. a blank faction) is diagnosable from tagging.log rather
+                # than inferred: best-match distance, slug-filtered vs unfiltered
+                # fallback, and whether the weak-context note fired.
+                retrieval_diag = (
+                    f"dist={distances[0]:.3f} slug_filtered={slug_filtered} "
+                    f"weak_context={bool(context_note)}"
+                )
                 related = related_pages_block([m for _, m in confident_docs])
 
                 # cl100k token counts are approximate for non-OpenAI models, but
@@ -670,7 +678,7 @@ def run_tagging(
                 writer.writerow(make_row(rel_name, parsed, tagged_at=tagged_at))
                 processed.add(rel_name)
                 print(f"Tagged {rel_name} [{provider}] using {token_count} tokens")
-                logging.info(f"Tagged {rel_name} | Tokens: {token_count} | {provider}")
+                logging.info(f"Tagged {rel_name} | Tokens: {token_count} | {provider} | {retrieval_diag}")
             except Exception as e:
                 # Unexpected failure — leave the file out of the CSV so a
                 # re-run retries it rather than stranding a blank row.

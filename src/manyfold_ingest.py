@@ -99,7 +99,19 @@ def _model_dir_name(filename: str) -> str:
     """A filesystem-safe, human-readable folder name for the model."""
     stem = Path(filename).stem.replace("+", " ").replace("_", " ")
     stem = re.sub(r"[^0-9A-Za-z' \-]+", " ", stem)
-    return re.sub(r"\s+", " ", stem).strip() or slugify(filename)
+    cleaned = re.sub(r"\s+", " ", stem).strip()
+    # Dedupe repeated words case-insensitively (preserving first occurrence and
+    # original casing), mirroring normalize_name. Vendor "Name_Name+variant"
+    # filenames otherwise double the title, e.g. "Sister Superior Sister
+    # Superior". Digits/apostrophes the title legitimately needs are kept.
+    seen: set[str] = set()
+    words: list[str] = []
+    for w in cleaned.split():
+        lw = w.lower()
+        if lw not in seen:
+            seen.add(lw)
+            words.append(w)
+    return " ".join(words) or slugify(filename)
 
 
 def stage_into_library(archive: Path, library_path: Path, tags: list[str]) -> Path:

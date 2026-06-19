@@ -132,6 +132,44 @@ def test_structured_csv_columns(tmp_path):
     assert row["tags"] == "Primaris"
 
 
+def _tagged_log_line(caplog):
+    return next(r.getMessage() for r in caplog.records
+               if r.getMessage().startswith("Tagged"))
+
+
+def test_logs_retrieval_diagnostics_on_weak_unfiltered_match(tmp_path, caplog):
+    # Unfiltered fallback (slug miss) with a distant best match: the log must
+    # record the distance and that the weak-context note fired, so a sparse
+    # result is diagnosable rather than inferred.
+    import logging
+    with caplog.at_level(logging.INFO):
+        _run_tagging(tmp_path, {
+            "documents": [["Some unrelated lore"]],
+            "distances": [[0.9]],
+            "metadatas": [[{"source": "u", "title": "Thing", "categories": "X"}]],
+        }, '{"faction": "Orks", "tags": []}', slug_hit=False)
+    msg = _tagged_log_line(caplog)
+    assert "dist=0.900" in msg
+    assert "slug_filtered=False" in msg
+    assert "weak_context=True" in msg
+
+
+def test_logs_retrieval_diagnostics_slug_hit_suppresses_weak_flag(tmp_path, caplog):
+    # A slug hit is on-topic by construction, so even a high distance must log
+    # weak_context=False (mirrors the prompt's no-weak-note behavior).
+    import logging
+    with caplog.at_level(logging.INFO):
+        _run_tagging(tmp_path, {
+            "documents": [["Wolfspear chapter lore"]],
+            "distances": [[0.74]],
+            "metadatas": [[{"source": "u", "title": "Wolfspear", "categories": "Space Wolves"}]],
+        }, '{"faction": "Space Marines", "tags": []}', slug_hit=True)
+    msg = _tagged_log_line(caplog)
+    assert "dist=0.740" in msg
+    assert "slug_filtered=True" in msg
+    assert "weak_context=False" in msg
+
+
 def test_prompt_includes_related_pages_and_no_weak_note_when_close(tmp_path):
     _, prompt = _run_tagging(tmp_path, {
         "documents": [["Techmarine - lore text"]],
