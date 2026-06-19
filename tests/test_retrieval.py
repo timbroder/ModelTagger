@@ -117,4 +117,4 @@ def test_run_tagging_falls_back_to_unfiltered(tmp_path):
     assert "where" not in calls[1].kwargs
     rows = list(csv.reader(open(out_csv)))
     assert rows[1][0] == "Wolfspear+Techmarine.stl"
-    assert rows[1][-1] != ""
+    assert rows[1][-2] != ""  # tags column (tagged_at is now trailing)

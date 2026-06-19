@@ -124,7 +124,7 @@ def test_structured_csv_columns(tmp_path):
     }, response)
 
     rows = list(csv.reader(open(out_csv)))
-    assert rows[0] == ["filename"] + WH_FIELDS + ["tags"]
+    assert rows[0] == ["filename"] + WH_FIELDS + ["tags", "tagged_at"]
     row = dict(zip(rows[0], rows[1]))
     assert row["faction"] == "Space Marines"
     assert row["unit"] == "Techmarine"

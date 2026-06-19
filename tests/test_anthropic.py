@@ -117,12 +117,13 @@ def test_run_tagging_anthropic_writes_schema_columns(tmp_path):
     out_csv, client = _run_tag_anthropic(tmp_path, record)
 
     rows = list(csv.reader(open(out_csv)))
-    assert rows[0] == ["filename"] + WH_FIELDS + ["tags"]
+    assert rows[0] == ["filename"] + WH_FIELDS + ["tags", "tagged_at"]
     row = dict(zip(rows[0], rows[1]))
     assert row["faction"] == "Space Marines"
     assert row["subfaction"] == "Wolfspear"
     assert row["equipment"] == "Servo-arm"
     assert row["tags"] == "Primaris"
+    assert row["tagged_at"]  # timestamp recorded
 
     # The enum-constrained schema (faction enum) was sent to the API
     schema = client.messages.create.call_args.kwargs["output_config"]["format"]["schema"]
@@ -254,4 +255,49 @@ def test_fields_derived_from_schema(tmp_path):
     record["tags"] = []
     out_csv, _ = _run_tag_anthropic(tmp_path, record)
     header = next(csv.reader(open(out_csv)))
-    assert header == ["filename"] + WH_FIELDS + ["tags"]
+    assert header == ["filename"] + WH_FIELDS + ["tags", "tagged_at"]
+
+
+def test_resume_migrates_pre_timestamp_csv(tmp_path):
+    # A CSV written before tagged_at existed (header lacks the trailing column)
+    # must be migrated in place — kept rows get a backfilled empty timestamp, a
+    # newly-tagged file gets a real one — without forcing a fresh file.
+    out_csv = tmp_path / "tags.csv"
+    old_header = ["filename"] + WH_FIELDS + ["tags"]  # no tagged_at
+    with open(out_csv, "w", newline="") as f:
+        import csv as _csv
+        w = _csv.writer(f)
+        w.writerow(old_header)
+        w.writerow(["done.stl"] + ["Orks"] + [""] * (len(WH_FIELDS) - 1) + ["Waaagh"])
+
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "done.stl").write_text("mesh")  # already tagged -> skip
+    (zips / "new.stl").write_text("mesh")   # not yet tagged -> tag now
+
+    mock_col = MagicMock()
+    mock_col.query.return_value = {
+        "documents": [["lore"]], "distances": [[0.3]], "metadatas": [[{"source": "u"}]],
+    }
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+    record = {f: "" for f in WH_FIELDS}
+    record["faction"] = "Tyranids"
+    record["tags"] = ["Hive"]
+    client = MagicMock()
+    client.messages.create.return_value = _fake_response(record)
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.get_anthropic_client", return_value=client), \
+            patch("tagging.count_tokens", side_effect=lambda text, model=None: len(text) // 4):
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(tmp_path / "db"), None, "warhammer",
+                    provider="anthropic")
+
+    rows = list(csv.reader(open(out_csv)))
+    assert rows[0] == ["filename"] + WH_FIELDS + ["tags", "tagged_at"]
+    by_name = {r[0]: dict(zip(rows[0], r)) for r in rows[1:]}
+    assert set(by_name) == {"done.stl", "new.stl"}
+    assert by_name["done.stl"]["tagged_at"] == ""        # migrated, backfilled blank
+    assert by_name["new.stl"]["tagged_at"]               # freshly tagged, real timestamp
+    assert client.messages.create.call_count == 1        # only new.stl hit the API

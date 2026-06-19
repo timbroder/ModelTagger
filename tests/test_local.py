@@ -110,8 +110,12 @@ def test_local_generation(tmp_path, monkeypatch):
     assert urls[1].endswith("/api/generate")
 
     rows = list(csv.reader(open(out_csv)))
-    # tags are title-cased during cleanup
-    assert rows[1][-1].replace(" ", "") == "Tag1,Tag2"
+    # tags are title-cased during cleanup; tagged_at is the trailing column
+    assert rows[0][-1] == "tagged_at"
+    assert rows[1][-2].replace(" ", "") == "Tag1,Tag2"
+    # a real UTC timestamp was recorded for the tagged row
+    from datetime import datetime
+    assert datetime.fromisoformat(rows[1][-1]).tzinfo is not None
 
 
 def test_tagging_recurses_nested_folders_with_relative_paths(tmp_path, monkeypatch):

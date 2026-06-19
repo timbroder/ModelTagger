@@ -196,11 +196,13 @@ columns. With `--provider anthropic`, that schema is sent to the API as a
 ever be one of their allowed values, so the taxonomy is guaranteed at the
 API level rather than hoped for in a prompt.
 
-- Results append to the `--tag-output` CSV with one column per field
-  (default: the preset's `tag_output`, e.g. `tags-warhammer.csv`);
+- Results append to the `--tag-output` CSV with one column per field plus a
+  trailing `tagged_at` timestamp (ISO-8601 UTC) recording when each row was
+  written (default: the preset's `tag_output`, e.g. `tags-warhammer.csv`);
   already-listed files are skipped, so re-running resumes where it left off.
-  Changing modes against an existing CSV with different columns aborts with
-  a clear error.
+  A CSV written before `tagged_at` existed is migrated in place on the next
+  run. Changing modes against an existing CSV with different columns aborts
+  with a clear error.
 - The prompt includes the retrieved pages' titles and wiki categories (a
   direct faction/role taxonomy signal), and when even the best lore match is
   distant — typical for third-party minis with no wiki page — the model is
