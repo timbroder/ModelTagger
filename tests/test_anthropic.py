@@ -129,8 +129,8 @@ def test_run_tagging_anthropic_writes_schema_columns(tmp_path):
     assert "Adepta Sororitas" in schema["properties"]["faction"]["enum"]
 
 
-def test_run_tagging_anthropic_fallback_on_none(tmp_path):
-    # ask_anthropic failing -> fallback row with empty structured fields
+def test_run_tagging_anthropic_failure_not_written_so_it_retries(tmp_path):
+    # ask_anthropic failing -> the file is NOT written, so a re-run retries it
     zips = tmp_path / "zips"
     zips.mkdir()
     (zips / "m.stl").write_text("mesh")
@@ -153,9 +153,98 @@ def test_run_tagging_anthropic_fallback_on_none(tmp_path):
                     provider="anthropic")
 
     rows = list(csv.reader(open(out_csv)))
+    assert len(rows) == 1  # header only; failed file omitted
+    assert "m.stl" not in {r[0] for r in rows[1:]}
+
+
+def test_failed_file_is_retried_and_tagged_on_rerun(tmp_path):
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "m.stl").write_text("mesh")
+    out_csv = tmp_path / "tags.csv"
+    mock_col = MagicMock()
+    mock_col.query.return_value = {
+        "documents": [["lore"]], "distances": [[0.3]], "metadatas": [[{"source": "u"}]],
+    }
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+
+    record = {f: "" for f in WH_FIELDS}
+    record["faction"] = "Orks"
+    record["tags"] = ["Waaagh"]
+
+    client = MagicMock()
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.get_anthropic_client", return_value=client), \
+            patch("tagging.time.sleep", lambda s: None), \
+            patch("tagging.count_tokens", side_effect=lambda text, model=None: len(text) // 4):
+        from tagging import run_tagging
+        # Run 1: API fails -> nothing written
+        client.messages.create.side_effect = RuntimeError("boom")
+        run_tagging(str(zips), str(out_csv), str(tmp_path / "db"), None, "warhammer",
+                    provider="anthropic")
+        assert len(list(csv.reader(open(out_csv)))) == 1  # header only
+
+        # Run 2 (resume): API succeeds -> the previously-failed file is retried
+        client.messages.create.side_effect = None
+        client.messages.create.return_value = _fake_response(record)
+        run_tagging(str(zips), str(out_csv), str(tmp_path / "db"), None, "warhammer",
+                    provider="anthropic")
+
+    rows = list(csv.reader(open(out_csv)))
+    assert len(rows) == 2  # header + exactly one row, no duplicate/blank
     assert rows[1][0] == "m.stl"
-    # tags column carries fallback snippets; structured fields empty
-    assert all(c == "" for c in rows[1][1:-1])
+    assert dict(zip(rows[0], rows[1]))["faction"] == "Orks"
+
+
+def test_resume_cleans_blank_and_duplicate_rows(tmp_path):
+    # A CSV from an older run with a blank row (failed) and a stray duplicate;
+    # resume should drop the blank (retry that file) and dedup the rest.
+    out_csv = tmp_path / "tags.csv"
+    header = ["filename"] + WH_FIELDS + ["tags"]
+    blank_good = {f: "" for f in WH_FIELDS}
+    with open(out_csv, "w", newline="") as f:
+        import csv as _csv
+        w = _csv.writer(f)
+        w.writerow(header)
+        w.writerow(["good.stl"] + ["Orks"] + [""] * (len(WH_FIELDS) - 1) + ["Waaagh"])
+        w.writerow(["blank.stl"] + [""] * len(WH_FIELDS) + [""])          # failed -> retry
+        w.writerow(["good.stl"] + ["Orks"] + [""] * (len(WH_FIELDS) - 1) + ["Waaagh"])  # dup
+
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    (zips / "blank.stl").write_text("mesh")   # the one to retry
+    (zips / "good.stl").write_text("mesh")    # already done -> skip
+
+    mock_col = MagicMock()
+    mock_col.query.return_value = {
+        "documents": [["lore"]], "distances": [[0.3]], "metadatas": [[{"source": "u"}]],
+    }
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+    record = {f: "" for f in WH_FIELDS}
+    record["faction"] = "Tyranids"
+    record["tags"] = ["Hive"]
+    client = MagicMock()
+    client.messages.create.return_value = _fake_response(record)
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.get_anthropic_client", return_value=client), \
+            patch("tagging.count_tokens", side_effect=lambda text, model=None: len(text) // 4):
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(tmp_path / "db"), None, "warhammer",
+                    provider="anthropic")
+
+    rows = list(csv.reader(open(out_csv)))
+    by_name = {}
+    for r in rows[1:]:
+        by_name.setdefault(r[0], []).append(r)
+    assert set(by_name) == {"good.stl", "blank.stl"}
+    assert len(by_name["good.stl"]) == 1          # deduped
+    assert len(by_name["blank.stl"]) == 1          # retried, now has content
+    assert dict(zip(rows[0], by_name["blank.stl"][0]))["faction"] == "Tyranids"
+    # good.stl was not re-tagged (skipped), so only blank.stl hit the API
+    assert client.messages.create.call_count == 1
 
 
 def test_fields_derived_from_schema(tmp_path):

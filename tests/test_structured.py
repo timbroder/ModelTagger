@@ -73,14 +73,23 @@ def test_related_pages_block():
     assert related_pages_block([None]) == ""
 
 
-def _run_tagging(tmp_path, query_return, response_text):
+def _run_tagging(tmp_path, query_return, response_text, slug_hit=True):
     zips = tmp_path / "zips"
     zips.mkdir()
     (zips / "Wolfspear+Techmarine.stl").write_text("mesh")
     out_csv = tmp_path / "tags.csv"
 
+    empty = {"documents": [[]], "distances": [[]], "metadatas": [[]]}
+
+    def query_side_effect(*args, **kwargs):
+        # The slug-filtered query passes where=; make it miss when slug_hit is
+        # False so retrieval falls through to the unfiltered query.
+        if "where" in kwargs and not slug_hit:
+            return empty
+        return query_return
+
     mock_col = MagicMock()
-    mock_col.query.return_value = query_return
+    mock_col.query.side_effect = query_side_effect
     mock_pc = MagicMock()
     mock_pc.get_or_create_collection.return_value = mock_col
 
@@ -134,13 +143,39 @@ def test_prompt_includes_related_pages_and_no_weak_note_when_close(tmp_path):
     assert "weak match" not in prompt
 
 
-def test_prompt_warns_on_weak_context(tmp_path):
+def test_prompt_warns_on_weak_context_when_unfiltered(tmp_path):
+    # Unfiltered retrieval (slug filter missed) with a distant best match:
+    # the model is warned to ignore the probably-unrelated lore.
     _, prompt = _run_tagging(tmp_path, {
         "documents": [["Obliterator Virus - unrelated lore"]],
-        "distances": [[0.66]],
+        "distances": [[0.9]],
         "metadatas": [[{"source": "u", "title": "Obliterator Virus", "categories": "Diseases"}]],
-    }, '{"tags": []}')
+    }, '{"tags": []}', slug_hit=False)
     assert "weak match" in prompt
+
+
+def test_no_weak_warning_when_slug_filter_fired(tmp_path):
+    # A slug match means the page is on-topic by name, so even a high
+    # embedding distance must NOT trigger the weak-context warning (regression:
+    # Wolfspear at 0.74 was wrongly told to ignore its own chapter page).
+    _, prompt = _run_tagging(tmp_path, {
+        "documents": [["Wolfspear - chapter lore"]],
+        "distances": [[0.74]],
+        "metadatas": [[{"source": "u", "title": "Wolfspear", "categories": "Space Wolves Successor Chapters"}]],
+    }, '{"tags": []}', slug_hit=True)
+    assert "weak match" not in prompt
+    assert "Related wiki pages:" in prompt
+
+
+def test_weak_warning_threshold_is_minilm_scale(tmp_path):
+    # A 0.66 unfiltered match is now considered usable (below the 0.8 default
+    # tuned for MiniLM); only clearly-distant matches warn.
+    _, prompt = _run_tagging(tmp_path, {
+        "documents": [["Some lore"]],
+        "distances": [[0.66]],
+        "metadatas": [[{"source": "u", "title": "Thing", "categories": "X"}]],
+    }, '{"tags": []}', slug_hit=False)
+    assert "weak match" not in prompt
 
 
 def test_header_mismatch_exits(tmp_path):

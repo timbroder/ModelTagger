@@ -8,6 +8,23 @@ from embed import run_embedding
 from manyfold_ingest import run_upload
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "tagging_presets.json"
+# Repo root holds the project's .env (ANTHROPIC_API_KEY, OPENAI_API_KEY, MANYFOLD_*)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_env() -> None:
+    """Load API keys from a .env file if python-dotenv is installed.
+
+    Looks for a .env in the repo root and in the current working directory.
+    Real environment variables always win (override=False), so an exported
+    key is never clobbered by the file.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(_REPO_ROOT / ".env", override=False)
+    load_dotenv(Path.cwd() / ".env", override=False)  # also pick up a .env in the cwd
 
 
 def load_preset(mode: str) -> dict:
@@ -56,6 +73,9 @@ def _add_upload_opts(p):
                                           '(default: $MANYFOLD_LIBRARY_PATH)')
     p.add_argument('--dry-run', action='store_true', help='Report what would change without writing')
     p.add_argument('--limit', type=int, help='Stop after this many staged/updated models')
+    p.add_argument('--delete-source', action='store_true',
+                   help='Delete each source archive after it is successfully staged into the '
+                        'library (reclaims NAS space; off by default)')
 
 
 def _add_tag_opts(p):
@@ -120,6 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    load_env()
     args = build_parser().parse_args()
     preset = load_preset(args.mode)
 
@@ -171,6 +192,7 @@ def main():
             dry_run=args.dry_run,
             limit=args.limit,
             check=args.check,
+            delete_source=args.delete_source,
         )
     elif args.step == 'all' and args.upload:
         print("=== Upload ===")
@@ -180,6 +202,7 @@ def main():
             library_path=args.library_path,
             dry_run=args.dry_run,
             limit=args.limit,
+            delete_source=args.delete_source,
         )
 
 

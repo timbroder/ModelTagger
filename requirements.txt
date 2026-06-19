@@ -5,6 +5,7 @@ spacy>=3.8,<4
 requests>=2.31,<3
 openai>=1.0,<3
 anthropic>=0.69,<1
+python-dotenv>=1.0,<2
 tiktoken>=0.7,<1
 chromadb>=0.5,<2
 patool>=2.0

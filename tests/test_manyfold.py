@@ -7,7 +7,7 @@ import pytest
 
 sys.path.append('src')
 
-from manyfold import ManyfoldClient, model_tags, _items, _next_link
+from manyfold import ManyfoldClient, ManyfoldError, model_tags, _items, _next_link
 from manyfold_ingest import (
     build_tags,
     merge_tags,
@@ -72,6 +72,12 @@ def test_normalize_and_match():
     assert match_model("Sister Superior.zip", models) is None
 
 
+def test_match_dedupes_doubled_filename():
+    # Vendor "Name_Name+variant" pattern must match Manyfold's shorter name
+    models = {normalize_name("Sister Superior"): {"id": 9, "name": "Sister Superior"}}
+    assert match_model("Sister Superior_Sister+Superior.zip", models)["id"] == 9
+
+
 def test_model_tags_shapes():
     assert model_tags({"tags": ["a", "b"]}) == ["a", "b"]
     assert model_tags({"tags": [{"name": "a"}, {"name": "b"}]}) == ["a", "b"]
@@ -99,6 +105,55 @@ def _resp(status=200, body=None):
     return r
 
 
+def test_base_url_strips_api_docs_suffix():
+    # Pasting the docs URL (…/api) must still resolve resources + oauth at root
+    assert ManyfoldClient("https://mf.example/api").base_url == "https://mf.example"
+    assert ManyfoldClient("https://mf.example/api/v0").base_url == "https://mf.example"
+    assert ManyfoldClient("https://mf.example/api/").base_url == "https://mf.example"
+    assert ManyfoldClient("https://mf.example/").base_url == "https://mf.example"
+
+
+def test_oauth_uses_configured_scope_and_root_token_url():
+    client = ManyfoldClient("https://mf.example/api", client_id="cid",
+                            client_secret="sec", scopes="read write", min_interval=0)
+    with patch("manyfold.requests.post", return_value=_resp(200, {"access_token": "T"})) as mock_post:
+        tok = client._ensure_token()
+    assert tok == "T"
+    assert mock_post.call_args.args[0] == "https://mf.example/oauth/token"  # /api stripped
+    assert mock_post.call_args.kwargs["data"]["scope"] == "read write"
+
+
+def test_oauth_default_scope_includes_public():
+    # GET /models requires ["public","read"]; the default must include public
+    client = ManyfoldClient("https://mf.example", client_id="c", client_secret="s", min_interval=0)
+    with patch("manyfold.requests.post", return_value=_resp(200, {"access_token": "T"})) as mock_post:
+        client._ensure_token()
+    assert mock_post.call_args.kwargs["data"]["scope"] == "public read write"
+
+
+def test_oauth_404_gives_actionable_error():
+    client = ManyfoldClient("https://mf.example/api", client_id="c", client_secret="s", min_interval=0)
+    with patch("manyfold.requests.post", return_value=_resp(404, {})):
+        try:
+            client._ensure_token()
+            assert False, "expected ManyfoldError"
+        except ManyfoldError as e:
+            assert "root" in str(e).lower()  # hints to use the instance root URL
+
+
+def test_oauth_invalid_scope_gives_actionable_error():
+    bad = MagicMock(); bad.ok = False; bad.status_code = 400
+    bad.text = '{"error":"invalid_scope","error_description":"..."}'
+    client = ManyfoldClient("https://mf.example", client_id="c", client_secret="s",
+                            scopes="read write delete", min_interval=0)
+    with patch("manyfold.requests.post", return_value=bad):
+        try:
+            client._ensure_token()
+            assert False, "expected ManyfoldError"
+        except ManyfoldError as e:
+            assert "scope" in str(e).lower()
+
+
 def test_client_paginates_and_authenticates():
     client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
     pages = [
@@ -119,13 +174,23 @@ def test_client_retries_on_429(monkeypatch):
         assert client.list_models() == []
 
 
-def test_client_update_model_falls_back_to_flat_payload(monkeypatch):
-    monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
+def test_client_update_model_sends_flat_vendor_body():
     client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
-    with patch("manyfold.requests.request", side_effect=[_resp(422), _resp(200)]) as mock_req:
-        client.update_model({"id": 5}, {"tag_list": ["a"]})
-    assert mock_req.call_args_list[0].kwargs["json"] == {"model": {"tag_list": ["a"]}}
-    assert mock_req.call_args_list[1].kwargs["json"] == {"tag_list": ["a"]}
+    with patch("manyfold.requests.request", return_value=_resp(200)) as mock_req:
+        client.update_model({"@id": "http://localhost:3214/models/5"},
+                            {"keywords": ["a"], "isPartOf": {"@id": "/collections/1"}})
+    c = mock_req.call_args.kwargs
+    # flat JSON-LD body, vendor media type, and the localhost @id rewritten to our host
+    assert json.loads(c["data"]) == {"keywords": ["a"], "isPartOf": {"@id": "/collections/1"}}
+    assert c["headers"]["Content-Type"] == "application/vnd.manyfold.v0+json"
+    assert mock_req.call_args.args[1] == "https://mf.example/models/5"
+
+
+def test_request_rewrites_internal_host():
+    client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
+    with patch("manyfold.requests.request", return_value=_resp(200)) as mock_req:
+        client._request("GET", "http://localhost:3214/models/abc?page=2")
+    assert mock_req.call_args.args[1] == "https://mf.example/models/abc?page=2"
 
 
 # --- staging --------------------------------------------------------------
@@ -164,7 +229,8 @@ def _fake_client(models=None, collections=None):
     client = MagicMock()
     client.list_models.return_value = models or []
     client.list_collections.return_value = collections or []
-    client.create_collection.side_effect = lambda name: {"id": 99, "name": name}
+    client.get_model.side_effect = lambda m: m  # list item == detail in tests
+    client.create_collection.side_effect = lambda name: {"@id": "/collections/99", "name": name}
     client.trigger_scan.return_value = True
     return client
 
@@ -176,16 +242,16 @@ def test_run_upload_updates_existing_model(tmp_path, monkeypatch):
     csv_path = _write_csv(tmp_path, [
         {"filename": "Wolfspear+Techmarine.zip", "faction": "Space Marines", "unit": "Techmarine"},
     ])
-    model = {"id": 1, "name": "Wolfspear Techmarine", "tags": ["painted"]}
+    model = {"id": 1, "name": "Wolfspear Techmarine", "keywords": ["painted"]}
     client = _fake_client(models=[model])
 
     with patch("manyfold_ingest.ManyfoldClient", return_value=client):
         run_upload(str(csv_path))
 
     attributes = client.update_model.call_args.args[1]
-    assert "painted" in attributes["tag_list"]
-    assert "faction: Space Marines" in attributes["tag_list"]
-    assert attributes["collection_id"] == 99
+    assert "painted" in attributes["keywords"]                 # manual tag preserved
+    assert "faction: Space Marines" in attributes["keywords"]
+    assert attributes["isPartOf"] == {"@id": "/collections/99", "@type": "Collection"}
     client.create_collection.assert_called_once_with("Space Marines")
 
 
@@ -195,14 +261,15 @@ def test_run_upload_respects_existing_collection_assignment(tmp_path, monkeypatc
     csv_path = _write_csv(tmp_path, [
         {"filename": "Wolfspear+Techmarine.zip", "faction": "Space Marines"},
     ])
-    model = {"id": 1, "name": "Wolfspear Techmarine", "tags": [], "collection_id": 7}
+    model = {"id": 1, "name": "Wolfspear Techmarine", "keywords": [],
+             "isPartOf": {"@id": "/collections/7", "@type": "Collection"}}
     client = _fake_client(models=[model])
 
     with patch("manyfold_ingest.ManyfoldClient", return_value=client):
         run_upload(str(csv_path))
 
     attributes = client.update_model.call_args.args[1]
-    assert "collection_id" not in attributes
+    assert "isPartOf" not in attributes  # manual collection placement preserved
 
 
 def test_run_upload_stages_missing_models_and_scans(tmp_path, monkeypatch):
@@ -223,6 +290,46 @@ def test_run_upload_stages_missing_models_and_scans(tmp_path, monkeypatch):
     assert (library / "Sister Superior" / "datapackage.json").exists()
     client.trigger_scan.assert_called_once()
     client.update_model.assert_not_called()
+
+
+def test_run_upload_delete_source_removes_archive_after_staging(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    src = zips / "Sister Superior.stl"
+    src.write_text("mesh")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "Sister Superior.stl", "faction": "Adepta Sororitas"},
+    ])
+    client = _fake_client()
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library),
+                   delete_source=True)
+
+    assert (library / "Sister Superior" / "datapackage.json").exists()  # staged into B
+    assert not src.exists()                                             # source removed from A
+
+
+def test_run_upload_dry_run_keeps_source_even_with_delete_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    zips.mkdir()
+    src = zips / "Sister Superior.stl"
+    src.write_text("mesh")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [{"filename": "Sister Superior.stl", "faction": "Adepta Sororitas"}])
+    client = _fake_client()
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library),
+                   delete_source=True, dry_run=True)
+
+    assert src.exists()              # dry run never deletes
+    assert not library.exists()      # and never stages
 
 
 def test_run_upload_dry_run_writes_nothing(tmp_path, monkeypatch):

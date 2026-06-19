@@ -110,7 +110,8 @@ def test_local_generation(tmp_path, monkeypatch):
     assert urls[1].endswith("/api/generate")
 
     rows = list(csv.reader(open(out_csv)))
-    assert rows[1][-1].replace(" ", "") == "tag1,tag2"
+    # tags are title-cased during cleanup
+    assert rows[1][-1].replace(" ", "") == "Tag1,Tag2"
 
 
 def test_rerank(tmp_path, monkeypatch):
@@ -215,11 +216,12 @@ def test_empty_vector_db_skips_gracefully(tmp_path, monkeypatch):
         from tagging import run_tagging
         run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
 
-    # No LLM call should have been made and the file logged with empty tags
+    # No LLM call, and the file is NOT written (so a re-run retries it once
+    # the vector DB has lore) — only the header is present.
     assert not any(call.args[0].endswith("/api/generate") for call in mock_post.call_args_list)
     rows = list(csv.reader(open(out_csv)))
-    assert rows[1][0] == "m.stl"
-    assert all(cell == "" for cell in rows[1][1:])
+    assert len(rows) == 1  # header only
+    assert "m.stl" not in {r[0] for r in rows[1:]}
 
 
 def test_main_wires_prompt_override(monkeypatch):
@@ -240,7 +242,7 @@ def test_main_wires_prompt_override(monkeypatch):
     assert captured["prompt_override"] == "custom prompt"
 
 
-def test_logs_failed_file(tmp_path, monkeypatch):
+def test_failed_extraction_not_written_so_it_retries(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     zips = tmp_path / "zips"
     zips.mkdir()
@@ -257,6 +259,7 @@ def test_logs_failed_file(tmp_path, monkeypatch):
         from tagging import run_tagging
         run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
 
+    # A failed file is NOT written — only the header — so a re-run retries it.
     rows = list(csv.reader(open(out_csv)))
-    assert rows[1][0] == "bad.stl"
-    assert rows[1][1] == ""
+    assert len(rows) == 1
+    assert rows[0][0] == "filename"

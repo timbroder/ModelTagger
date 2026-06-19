@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import json
+import re
 import threading
 import time
+from urllib.parse import urlparse
 import requests
+
+# Manyfold's API is content-negotiated on a versioned vendor media type.
+# Sending plain application/json routes to the HTML web UI (a Devise login
+# wall), so reads AND writes must use this on Accept (and Content-Type).
+_MEDIA_TYPE = "application/vnd.manyfold.v0+json"
 
 
 class ManyfoldError(RuntimeError):
@@ -67,12 +75,17 @@ class ManyfoldClient:
         token: str | None = None,
         client_id: str | None = None,
         client_secret: str | None = None,
+        scopes: str = "public read write",
         min_interval: float = 0.25,
     ):
-        self.base_url = base_url.rstrip("/")
+        # REST resources and /oauth/token live at the root; only the docs are
+        # under /api. Tolerate a pasted docs URL by stripping a trailing
+        # /api[/vN] so both auth and resource calls hit the right place.
+        self.base_url = re.sub(r"/api(/v\d+)?/?$", "", base_url.rstrip("/"))
         self._token = token
         self._client_id = client_id
         self._client_secret = client_secret
+        self._scopes = scopes
         self._rate_lock = threading.Lock()
         self._last_request = 0.0
         self._min_interval = min_interval
@@ -87,25 +100,45 @@ class ManyfoldClient:
                 "Set MANYFOLD_API_TOKEN, or MANYFOLD_CLIENT_ID and "
                 "MANYFOLD_CLIENT_SECRET for OAuth client credentials."
             )
+        url = f"{self.base_url}/oauth/token"
         resp = requests.post(
-            f"{self.base_url}/oauth/token",
+            url,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self._client_id,
                 "client_secret": self._client_secret,
-                "scope": "read write",
+                "scope": self._scopes,
             },
             timeout=30,
         )
         if not resp.ok:
-            raise ManyfoldError(f"OAuth token request failed: HTTP {resp.status_code}")
+            detail = resp.text[:300].strip()
+            hint = ""
+            if resp.status_code == 404:
+                hint = (f" — no token endpoint at {url}. Set MANYFOLD_API_URL to the "
+                        "instance root (e.g. https://manyfold.example.net), not the /api docs URL.")
+            elif "invalid_scope" in detail:
+                hint = (f" — the OAuth application doesn't allow scope '{self._scopes}'. "
+                        "Grant it those scopes in Manyfold, or set MANYFOLD_SCOPES to match.")
+            raise ManyfoldError(f"OAuth token request failed: HTTP {resp.status_code}{hint}\n{detail}")
         self._token = resp.json()["access_token"]
         return self._token
 
     def _request(self, method: str, path: str, retries: int = 4, **kwargs) -> requests.Response:
-        url = path if path.startswith("http") else f"{self.base_url}{path}"
+        if path.startswith("http"):
+            # Manyfold returns absolute @id URLs with its INTERNAL host
+            # (e.g. http://localhost:3214/...). Rewrite to our reachable host.
+            p = urlparse(path)
+            url = f"{self.base_url}{p.path}" + (f"?{p.query}" if p.query else "")
+        else:
+            url = f"{self.base_url}{path}"
         headers = kwargs.pop("headers", {})
-        headers.setdefault("Accept", "application/json")
+        headers.setdefault("Accept", _MEDIA_TYPE)
+        # Serialize a json body ourselves so we can set the vendor Content-Type
+        # (requests' json= would force application/json and miss the API).
+        if "json" in kwargs:
+            headers["Content-Type"] = _MEDIA_TYPE
+            kwargs["data"] = json.dumps(kwargs.pop("json"))
         headers["Authorization"] = f"Bearer {self._ensure_token()}"
         last_status = None
         for attempt in range(retries):
@@ -165,22 +198,30 @@ class ManyfoldClient:
     def list_libraries(self) -> list[dict]:
         return self._paginate("/libraries")
 
+    def get_model(self, model: dict) -> dict:
+        """Fetch a model's detail view (richer than the list item — includes
+        keywords and isPartOf, which the list representation omits)."""
+        resp = self._request("GET", self._resource_path(model, "models"))
+        if not resp.ok:
+            raise ManyfoldError(f"GET model -> HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp.json()
+
     def update_model(self, model: dict, attributes: dict) -> None:
+        # model_request schema is a flat JSON-LD body (keywords, isPartOf, ...)
         path = self._resource_path(model, "models")
-        resp = self._request("PATCH", path, json={"model": attributes})
-        if resp.status_code in (400, 415, 422):
-            # Some API versions accept flat JSON rather than Rails-wrapped
-            resp = self._request("PATCH", path, json=attributes)
+        resp = self._request("PATCH", path, json=attributes)
         if not resp.ok:
             raise ManyfoldError(f"PATCH {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
 
     def set_model_tags(self, model: dict, tags: list[str]) -> None:
-        self.update_model(model, {"tag_list": tags})
+        self.update_model(model, {"keywords": tags})
+
+    def set_model_collection(self, model: dict, collection_id: str) -> None:
+        """Assign a model to a collection via its isPartOf reference."""
+        self.update_model(model, {"isPartOf": {"@id": collection_id, "@type": "Collection"}})
 
     def create_collection(self, name: str) -> dict:
-        resp = self._request("POST", "/collections", json={"collection": {"name": name}})
-        if resp.status_code in (400, 415, 422):
-            resp = self._request("POST", "/collections", json={"name": name})
+        resp = self._request("POST", "/collections", json={"name": name})
         if not resp.ok:
             raise ManyfoldError(f"POST /collections -> HTTP {resp.status_code}: {resp.text[:200]}")
         return resp.json()
@@ -204,8 +245,9 @@ class ManyfoldClient:
         return triggered
 
     def openapi_spec(self) -> dict | None:
-        """Fetch the instance's OpenAPI spec (served under /api)."""
-        for path in ("/api/openapi.json", "/api-docs/openapi.json", "/api/spec.json", "/api.json"):
+        """Fetch the instance's OpenAPI spec (Manyfold serves it under /api)."""
+        for path in ("/api/v0/openapi.json", "/api/openapi.json",
+                     "/api-docs/openapi.json", "/api/spec.json", "/api.json"):
             resp = self._request("GET", path)
             if resp.ok:
                 try:

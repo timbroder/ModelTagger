@@ -14,7 +14,7 @@ import time
 import logging
 import re
 import requests
-from utils import slugify
+from utils import slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS
 
 # Resolve config relative to the repo root so the CLI works from any cwd
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -77,46 +77,6 @@ def is_valid_archive_content(folder: Path) -> bool:
         if f.suffix.lower() in bad_exts:
             return False
     return any(f.suffix.lower() in allowed_exts for f in files)
-
-
-def clean_file_name(name: str) -> str:
-    """Remove dates, timestamps, and symbols from a filename stem."""
-    name = re.sub(r"\d{4}[-_\.]\d{2}[-_\.]\d{2}", " ", name)  # YYYY-MM-DD or similar
-    name = re.sub(r"\d{2}[-_\.]\d{2}[-_\.]\d{4}", " ", name)  # DD-MM-YYYY or MM-DD-YYYY
-    name = re.sub(r"\d{8,14}", " ", name)  # Compact dates or timestamps
-    name = re.sub(r"\b(19|20)\d{2}\b", " ", name)  # Year alone
-    name = re.sub(r"[^0-9a-zA-Z]+", " ", name)  # Replace symbols with spaces
-    return re.sub(r"\s+", " ", name).strip()
-
-# Tokens that describe print files rather than the miniature subject
-_JUNK_TOKENS = {
-    "supported", "presupported", "unsupported", "presup", "sup", "supports",
-    "support", "base", "bases", "body", "bodies", "head", "heads", "arm",
-    "arms", "leg", "legs", "left", "right", "part", "parts", "bits", "bit",
-    "stl", "obj", "lys", "chitubox", "lychee", "final", "fixed", "repaired",
-    "hollow", "hollowed", "solid", "raw", "merged", "split", "cut", "uncut",
-    "version", "copy", "new", "old", "test", "print", "prints", "file", "files",
-}
-
-
-def filter_query_tokens(words: list[str]) -> list[str]:
-    """Drop filename tokens that carry no lore signal: print-prep words,
-    anything with digits (versions, dates, print-farm suffixes), and
-    fragments. Deduplicates case-insensitively, preserving order."""
-    out: list[str] = []
-    seen: set[str] = set()
-    for w in words:
-        lw = w.lower()
-        if lw in _JUNK_TOKENS:
-            continue
-        if any(ch.isdigit() for ch in w):
-            continue
-        if len(w) <= 2:
-            continue
-        if lw not in seen:
-            seen.add(lw)
-            out.append(w)
-    return out
 
 
 def candidate_slugs(words: list[str]) -> list[str]:
@@ -193,10 +153,14 @@ def related_pages_block(metadatas: list[dict | None]) -> str:
     return "Related wiki pages:\n" + "\n".join(lines) + "\n\n"
 
 
-# Above this best-match cosine distance the retrieved context is probably
+# Above this best-match cosine distance an UNFILTERED retrieval is probably
 # unrelated (third-party minis with no wiki page) — warn the LLM rather than
-# let it weave noise into the tags
-_WEAK_CONTEXT_DISTANCE = 0.55
+# let it weave noise into the tags. Tuned to the default MiniLM embedder,
+# whose distances run high even for good matches (~0.5-0.8 is common). This
+# guard is NOT applied when the slug filter fired: a slug match means the
+# page name matches the file, so the page is on-topic by construction
+# regardless of embedding distance.
+_WEAK_CONTEXT_DISTANCE = 0.8
 _WEAK_CONTEXT_NOTE = (
     "Note: the lore context below was only a weak match for this file name. "
     "Ignore it unless it is clearly about this miniature; otherwise rely on "
@@ -204,11 +168,87 @@ _WEAK_CONTEXT_NOTE = (
 )
 
 
+# Tag values that are print/file metadata or trivially universal — never lore.
+# (_JUNK_TOKENS already covers single print-prep words; these are phrases.)
+_TAG_STOPWORDS = {
+    "warhammer 40k", "warhammer 40000", "warhammer", "40k", "miniature", "mini",
+    "miniatures", "3d print", "3d printable", "3d model", "stl", "obj",
+    "custom sculpt", "sculpt", "fan made", "fan-made", "proxy", "tabletop",
+    "wargaming", "wargame", "model", "figure", "figurine", "resin", "pre-supported",
+    "multi-part model", "multi-part", "multipart", "multi part", "single piece",
+    "single-piece", "highly detailed", "high detail",
+}
+
+_SMALL_WORDS = {"of", "the", "and", "a", "an", "in", "on", "for", "to", "with", "or"}
+
+
+def titlecase_tag(t: str) -> str:
+    """Capitalize each word's first letter (leaving the rest as-is so
+    'Mechanicus' / 'McGuffin' survive), lowercasing small connector words."""
+    words = t.split()
+    out = []
+    for i, w in enumerate(words):
+        if i > 0 and w.lower() in _SMALL_WORDS:
+            out.append(w.lower())
+        elif w[:1].isalpha():
+            out.append(w[:1].upper() + w[1:])
+        else:
+            out.append(w)
+    return " ".join(out)
+
+
+def _dedupe_substrings(items: list[str]) -> list[str]:
+    """Drop an item whose words appear as a contiguous run inside another item
+    (e.g. drop 'Claws' when 'Oversized Claws' is present)."""
+    result = []
+    for i, it in enumerate(items):
+        pad = f" {it.lower()} "
+        if any(j != i and pad in f" {items[j].lower()} " for j in range(len(items))):
+            continue
+        result.append(it)
+    return result
+
+
+def clean_equipment(value: str) -> str:
+    """Title-case, case-insensitively dedupe, and drop redundant substrings
+    from a comma-joined equipment string."""
+    items, seen = [], set()
+    for part in value.split(","):
+        p = titlecase_tag(part.strip())
+        if p and p.lower() not in seen:
+            seen.add(p.lower())
+            items.append(p)
+    return ", ".join(_dedupe_substrings(items))
+
+
+def clean_tags(tags: list[str], field_values: list[str]) -> list[str]:
+    """Drop tags that duplicate a structured field or are print/file metadata,
+    normalize casing, and dedupe — so the tag cloud stays clean and lore-only."""
+    taken: set[str] = set()
+    for v in field_values:
+        for part in str(v).split(","):
+            p = part.strip().lower()
+            if p:
+                taken.add(p)
+    out, seen = [], set()
+    for t in tags:
+        t = " ".join(str(t).split())  # collapse whitespace
+        low = t.lower()
+        if not t or low in taken or low in _TAG_STOPWORDS or low in _JUNK_TOKENS:
+            continue
+        title = titlecase_tag(t)
+        if title.lower() not in seen:
+            seen.add(title.lower())
+            out.append(title)
+    return out
+
+
 def normalize_record(data: dict, fields: list[str]) -> dict:
     """Coerce a tag dict into {field: str, "tags": [str]} for CSV output.
 
-    List-valued fields (e.g. equipment) become comma strings; "unknown"-like
-    values become empty strings; the tags array is cleaned.
+    List-valued fields become comma strings; "unknown"-like values become
+    empty; equipment is deduped/title-cased; tags are stripped of field
+    duplicates and print/file metadata and normalized.
     """
     out: dict = {}
     for f in fields:
@@ -216,11 +256,15 @@ def normalize_record(data: dict, fields: list[str]) -> dict:
         if isinstance(v, list):
             v = ", ".join(str(x).strip() for x in v if str(x).strip())
         v = str(v).strip()
-        out[f] = "" if v.lower() in ("unknown", "none", "n/a", "null") else v
+        v = "" if v.lower() in ("unknown", "none", "n/a", "null") else v
+        if f == "equipment" and v:
+            v = clean_equipment(v)
+        out[f] = v
     tags = data.get("tags", [])
     if isinstance(tags, str):
         tags = parse_tags(tags)
-    out["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+    tags = [str(t).strip() for t in tags if str(t).strip()]
+    out["tags"] = clean_tags(tags, [out[f] for f in fields])
     return out
 
 
@@ -239,7 +283,7 @@ def parse_structured(raw: str, fields: list[str]) -> dict:
             data = None
         if isinstance(data, dict):
             return normalize_record(data, fields)
-    return {**{f: "" for f in fields}, "tags": parse_tags(raw)}
+    return normalize_record({"tags": parse_tags(raw)}, fields)
 
 
 def build_schema(fields: list[str]) -> dict:
@@ -443,9 +487,21 @@ def run_tagging(
                     f"{output_csv} has columns {existing_header} but this mode produces "
                     f"{header}. Point --tag-output at a fresh file."
                 )
+            # Keep only rows with real tag content, deduped by filename (last
+            # wins). Blank rows from a failed attempt are dropped so the file
+            # is retried; dedup prevents a re-run from doubling a filename.
+            kept: dict[str, list] = {}
             for row in reader:
-                if row:
-                    processed.add(row[0])
+                if row and any(cell.strip() for cell in row[1:]):
+                    kept[row[0]] = row
+        processed = set(kept)
+        # Rewrite the cleaned CSV atomically before appending new rows.
+        tmp = f"{output_csv}.tmp"
+        with open(tmp, "w", newline="") as wf:
+            w = csv.writer(wf)
+            w.writerow(header)
+            w.writerows(kept.values())
+        os.replace(tmp, output_csv)
 
     with open(output_csv, 'a', newline='') as f:
         writer = csv.writer(f)
@@ -462,9 +518,10 @@ def run_tagging(
             try:
                 temp_dir = extract_to_temp(path)
                 if not temp_dir or not is_valid_archive_content(temp_dir):
-                    print(f"Skipping {path.name} — invalid content")
-                    writer.writerow(make_row(path.name))
-                    processed.add(path.name)
+                    # Not written to the CSV, so a re-run retries it (e.g. an
+                    # extractor was missing or the archive was re-downloaded).
+                    print(f"Skipping {path.name} — could not extract / no valid content (will retry on re-run)")
+                    logging.warning(f"No valid content for {path.name} (not written; retry on re-run)")
                     continue
 
                 # Put the base name (stem) of the file at the front, then add all contained names
@@ -501,13 +558,16 @@ def run_tagging(
                 # signal), falling back to an unfiltered semantic query.
                 slugs = candidate_slugs(base_words)
                 results = None
+                slug_filtered = False
                 if slugs:
                     results = collection.query(
                         query_texts=[query_text],
                         n_results=20,
                         where={"slug": {"$in": slugs}},
                     )
-                    if not results["documents"][0]:
+                    if results["documents"][0]:
+                        slug_filtered = True
+                    else:
                         results = None
                 if results is None:
                     results = collection.query(query_texts=[query_text], n_results=20)
@@ -519,10 +579,8 @@ def run_tagging(
                     metadatas = [None] * len(documents)
 
                 if not documents:
-                    print(f"Skipping {path.name} — no lore found in vector DB")
-                    logging.warning(f"No lore retrieved for {path.name}")
-                    writer.writerow(make_row(path.name))
-                    processed.add(path.name)
+                    print(f"Skipping {path.name} — no lore found in vector DB (will retry on re-run)")
+                    logging.warning(f"No lore retrieved for {path.name} (not written; retry on re-run)")
                     continue
 
                 if rerank:
@@ -532,7 +590,14 @@ def run_tagging(
                 else:
                     confident_docs = select_context_docs(documents, distances, metadatas)
 
-                context_note = _WEAK_CONTEXT_NOTE if distances[0] > _WEAK_CONTEXT_DISTANCE else ""
+                # Only warn about weak context on the unfiltered path — a slug
+                # match means the page is on-topic by name, so trust its lore
+                # even when the embedding distance is high.
+                context_note = (
+                    _WEAK_CONTEXT_NOTE
+                    if not slug_filtered and distances[0] > _WEAK_CONTEXT_DISTANCE
+                    else ""
+                )
                 related = related_pages_block([m for _, m in confident_docs])
 
                 # cl100k token counts are approximate for non-OpenAI models, but
@@ -557,10 +622,10 @@ def run_tagging(
                 )
 
                 def fallback():
-                    print(f"[Fallback] Generation failed for {path.name}. Using Chroma document snippets.")
-                    logging.warning(f"Fallback to Chroma for {path.name}")
-                    writer.writerow(make_row(path.name, tags=[d[:50] for d in documents[:5]]))
-                    processed.add(path.name)
+                    # Generation failed (API error / "unknown"). Don't write a
+                    # row so the file is retried on the next run.
+                    print(f"[Retry on re-run] Generation failed for {path.name}")
+                    logging.warning(f"Generation failed for {path.name} (not written; retry on re-run)")
 
                 if provider == "anthropic":
                     # Schema-enforced: the record is guaranteed to match `schema`
@@ -588,10 +653,10 @@ def run_tagging(
                 print(f"Tagged {path.name} [{provider}] using {token_count} tokens")
                 logging.info(f"Tagged {path.name} | Tokens: {token_count} | {provider}")
             except Exception as e:
-                print(f"Error processing {path.name}: {e}")
+                # Unexpected failure — leave the file out of the CSV so a
+                # re-run retries it rather than stranding a blank row.
+                print(f"Error processing {path.name} (will retry on re-run): {e}")
                 logging.error(f"Tagging failed for {path.name}: {e}")
-                writer.writerow(make_row(path.name))
-                processed.add(path.name)
             finally:
                 if temp_dir:
                     shutil.rmtree(temp_dir, ignore_errors=True)

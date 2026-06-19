@@ -13,7 +13,7 @@ import patoolib
 from tqdm import tqdm
 
 from manyfold import ManyfoldClient, ManyfoldError, model_tags
-from utils import slugify
+from utils import slugify, clean_file_name, filter_query_tokens
 
 # Structured fields owned by this pipeline across all modes — namespaced tags
 # with these prefixes are replaced on re-runs; everything else (manual tags
@@ -71,8 +71,15 @@ def merge_tags(existing: list[str], new: list[str]) -> list[str]:
 
 
 def normalize_name(name: str) -> str:
-    """Normalize a filename or Manyfold model name for matching."""
-    return slugify(Path(name).stem.replace("+", " ").replace("_", " "))
+    """Normalize a filename or Manyfold model name for matching.
+
+    Applies the same cleaning the tagging step uses (strip dates, print-farm
+    junk, digit suffixes) and dedupes repeated words — so a vendor filename
+    like 'space-mongol-blade-master20210330-8016-1n0lirn' matches the model
+    Manyfold derives ('Space Mongol Blade Master'), and 'Name_Name+variant'
+    matches 'Name'."""
+    cleaned = clean_file_name(Path(name).stem.replace("+", " ").replace("_", " "))
+    return "-".join(t.lower() for t in filter_query_tokens(cleaned.split()))
 
 
 def match_model(filename: str, models_by_slug: dict[str, dict]) -> dict | None:
@@ -142,6 +149,7 @@ def run_upload(
     dry_run: bool = False,
     limit: int | None = None,
     check: bool = False,
+    delete_source: bool = False,
 ) -> None:
     """Sync a structured tag CSV into Manyfold.
 
@@ -160,6 +168,7 @@ def run_upload(
         token=os.getenv("MANYFOLD_API_TOKEN"),
         client_id=os.getenv("MANYFOLD_CLIENT_ID"),
         client_secret=os.getenv("MANYFOLD_CLIENT_SECRET"),
+        scopes=os.getenv("MANYFOLD_SCOPES", "public read write"),
     )
 
     if check:
@@ -197,7 +206,8 @@ def run_upload(
         collections[key] = created
         return created
 
-    stats = {"tagged": 0, "unchanged": 0, "staged": 0, "missing_source": 0, "errors": 0}
+    stats = {"tagged": 0, "unchanged": 0, "staged": 0, "deleted_source": 0,
+             "missing_source": 0, "errors": 0}
     actions = 0
     staged_any = False
 
@@ -211,16 +221,22 @@ def run_upload(
         try:
             model = match_model(filename, models_by_slug)
             if model is not None:
-                merged = merge_tags(model_tags(model), tags)
+                # The list item is minimal; fetch the detail view for the
+                # current keywords + collection (isPartOf), so we honor the
+                # update-owned-keep-manual policy and don't re-assign a
+                # collection the user set by hand.
+                detail = client.get_model(model) if not dry_run else model
+                existing = model_tags(detail)
+                merged = merge_tags(existing, tags)
                 attributes: dict = {}
-                if sorted(merged) != sorted(model_tags(model)):
-                    attributes["tag_list"] = merged
+                if sorted(merged) != sorted(existing):
+                    attributes["keywords"] = merged
                 faction = (row.get("faction") or "").strip()
-                if faction and not model.get("collection") and not model.get("collection_id"):
+                if faction and not detail.get("isPartOf"):
                     coll = ensure_collection(faction)
-                    cid = (coll or {}).get("id")
+                    cid = (coll or {}).get("@id") or (coll or {}).get("id")
                     if cid is not None:
-                        attributes["collection_id"] = cid
+                        attributes["isPartOf"] = {"@id": cid, "@type": "Collection"}
                 if not attributes:
                     stats["unchanged"] += 1
                     continue
@@ -242,10 +258,15 @@ def run_upload(
                     continue
                 actions += 1
                 if dry_run:
-                    print(f"[DRY RUN] would stage {filename} into {library} with {len(tags)} tags")
+                    extra = " then delete source" if delete_source else ""
+                    print(f"[DRY RUN] would stage {filename} into {library} with {len(tags)} tags{extra}")
                 else:
                     stage_into_library(source, library, tags)
                     staged_any = True
+                    # Only remove the source AFTER a successful stage into B.
+                    if delete_source:
+                        source.unlink()
+                        stats["deleted_source"] += 1
                 stats["staged"] += 1
         except Exception as e:
             # One bad archive or API hiccup must not kill a thousands-row sync
@@ -258,8 +279,9 @@ def run_upload(
         else:
             print("No scan endpoint available — trigger a library scan in the Manyfold UI, then re-run upload.")
 
+    deleted = f", {stats['deleted_source']} sources deleted" if delete_source else ""
     print(
         f"Done: {stats['tagged']} updated, {stats['unchanged']} unchanged, "
-        f"{stats['staged']} staged for scan, {stats['missing_source']} missing source, "
+        f"{stats['staged']} staged for scan{deleted}, {stats['missing_source']} missing source, "
         f"{stats['errors']} errors" + (" [dry run]" if dry_run else "")
     )

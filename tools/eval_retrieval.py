@@ -40,11 +40,14 @@ def probe_file(collection, stem: str, n_results: int = 20, show: int = 6) -> Non
     query = " ".join(words) or norm or stem
 
     used = "slug-filtered"
+    slug_filtered = False
     results = None
     if slugs:
         results = collection.query(query_texts=[query], n_results=n_results,
                                    where={"slug": {"$in": slugs}})
-        if not results["documents"][0]:
+        if results["documents"][0]:
+            slug_filtered = True
+        else:
             results = None
     if results is None:
         used = "UNFILTERED"
@@ -60,8 +63,10 @@ def probe_file(collection, stem: str, n_results: int = 20, show: int = 6) -> Non
     if not docs:
         print("    NO RESULTS")
         return
-    if dists[0] > _WEAK_CONTEXT_DISTANCE:
+    if not slug_filtered and dists[0] > _WEAK_CONTEXT_DISTANCE:
         print(f"    WEAK CONTEXT (best {dists[0]:.3f} > {_WEAK_CONTEXT_DISTANCE}) — LLM told to ignore")
+    elif slug_filtered and dists[0] > _WEAK_CONTEXT_DISTANCE:
+        print(f"    (slug match — trusting page despite distance {dists[0]:.3f})")
     picked = {id(d) for d, _ in select_context_docs(docs, dists, metas)}
     for d, dist, m in list(zip(docs, dists, metas))[:show]:
         mark = "*" if id(d) in picked else " "

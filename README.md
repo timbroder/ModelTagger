@@ -49,6 +49,10 @@ Tag *generation* needs an API key for the chosen `--provider`:
 locally — Chroma's built-in model by default, or a SentenceTransformer with
 `--use-local` — so no key is needed for scrape/embed.
 
+Keys can live in a **`.env`** file (loaded automatically): copy
+`.env.example` to `.env` and fill it in. Exported environment variables
+always take precedence over the file, and `.env` is gitignored.
+
 ---
 
 ## ⚙️ Usage
@@ -267,6 +271,10 @@ How the sync works:
 - Built for large libraries: rate-limited, retrying, resumable (`--limit`
   for incremental runs, re-staging and re-tagging are no-ops when nothing
   changed), and `--dry-run` reports the full plan without writing.
+- `--delete-source` removes each source archive *after* it's successfully
+  staged into the library, so you don't keep both the archive and the
+  unpacked copy on disk. Off by default; never deletes on `--dry-run` or on a
+  failed stage.
 
 > Note: Manyfold's HTTP API doesn't support file uploads (as of v0.118), so
 > staging requires filesystem access to the library folder. `--check` probes
