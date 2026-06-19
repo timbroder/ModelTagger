@@ -11,6 +11,7 @@ from openai import OpenAI
 import tiktoken  # Optional token estimation
 import csv
 import time
+from datetime import datetime, timezone
 import logging
 import re
 import requests
@@ -460,12 +461,16 @@ def run_tagging(
     else:
         chosen_model = model or _DEFAULT_MODELS[provider]
 
-    header = ["filename"] + fields + ["tags"]
+    # tagged_at records when each row was written (ISO-8601 UTC, second
+    # precision). Kept as the trailing column so older CSVs differ only by a
+    # missing final field and can be migrated in place (see resume below).
+    header = ["filename"] + fields + ["tags", "tagged_at"]
 
-    def make_row(filename: str, parsed: dict | None = None, tags: list | None = None) -> list:
+    def make_row(filename: str, parsed: dict | None = None, tags: list | None = None,
+                 tagged_at: str = "") -> list:
         parsed = parsed or {}
         tag_list = tags if tags is not None else parsed.get("tags", [])
-        return [filename] + [parsed.get(f, "") for f in fields] + [", ".join(tag_list)]
+        return [filename] + [parsed.get(f, "") for f in fields] + [", ".join(tag_list), tagged_at]
 
     chroma_client = PersistentClient(path=vector_db_path)
     collection = chroma_client.get_or_create_collection(name="lore")
@@ -482,7 +487,11 @@ def run_tagging(
         with open(output_csv, newline="") as rf:
             reader = csv.reader(rf)
             existing_header = next(reader, None)
-            if existing_header != header:
+            # A CSV written before tagged_at existed matches the header minus
+            # its trailing column; migrate it by backfilling an empty timestamp
+            # rather than forcing a fresh file (re-tagging is expensive).
+            migrate_pad = existing_header == header[:-1]
+            if existing_header != header and not migrate_pad:
                 raise SystemExit(
                     f"{output_csv} has columns {existing_header} but this mode produces "
                     f"{header}. Point --tag-output at a fresh file."
@@ -493,7 +502,7 @@ def run_tagging(
             kept: dict[str, list] = {}
             for row in reader:
                 if row and any(cell.strip() for cell in row[1:]):
-                    kept[row[0]] = row
+                    kept[row[0]] = (row + [""]) if migrate_pad else row
         processed = set(kept)
         # Rewrite the cleaned CSV atomically before appending new rows.
         tmp = f"{output_csv}.tmp"
@@ -657,7 +666,8 @@ def run_tagging(
                         continue
                     parsed = parse_structured(raw, fields)
 
-                writer.writerow(make_row(rel_name, parsed))
+                tagged_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                writer.writerow(make_row(rel_name, parsed, tagged_at=tagged_at))
                 processed.add(rel_name)
                 print(f"Tagged {rel_name} [{provider}] using {token_count} tokens")
                 logging.info(f"Tagged {rel_name} | Tokens: {token_count} | {provider}")
