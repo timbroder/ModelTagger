@@ -13,6 +13,7 @@ from manyfold_ingest import (
     merge_tags,
     normalize_name,
     match_model,
+    _model_dir_name,
     stage_into_library,
     run_upload,
 )
@@ -70,6 +71,16 @@ def test_normalize_and_match():
     assert match_model("Wolfspear Techmarines.zip", models)["id"] == 1
     # Clearly different name must NOT match
     assert match_model("Sister Superior.zip", models) is None
+
+
+def test_model_dir_name_dedupes_doubled_words():
+    # Vendor "Name_Name+variant" filenames must not double the title/folder
+    assert _model_dir_name("Sister Superior_Sister+Superior.zip") == "Sister Superior"
+    # Dedupe is case-insensitive, keeping the first occurrence's casing
+    assert _model_dir_name("Khan_KHAN.stl") == "Khan"
+    # Non-doubled names are unchanged
+    assert _model_dir_name("Wolfspear+Techmarine.zip") == "Wolfspear Techmarine"
+    assert _model_dir_name("Aveline.stl") == "Aveline"
 
 
 def test_match_dedupes_doubled_filename():
