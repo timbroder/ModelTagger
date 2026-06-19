@@ -114,6 +114,58 @@ def test_local_generation(tmp_path, monkeypatch):
     assert rows[1][-1].replace(" ", "") == "Tag1,Tag2"
 
 
+def test_tagging_recurses_nested_folders_with_relative_paths(tmp_path, monkeypatch):
+    # A nested incoming library: archives live in subfolders, and two share a
+    # basename. Discovery must recurse, and each row must carry the path
+    # RELATIVE to --zips so same-basename files don't collide on one row.
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    zips = tmp_path / "zips"
+    (zips / "sub_a").mkdir(parents=True)
+    (zips / "sub_b").mkdir(parents=True)
+    (zips / "top.stl").write_text("mesh")
+    (zips / "sub_a" / "Model.stl").write_text("mesh")
+    (zips / "sub_b" / "Model.stl").write_text("mesh")  # same basename, different folder
+    out_csv = tmp_path / "tags.csv"
+    vector_path = tmp_path / "db"
+
+    mock_col = MagicMock()
+    mock_col.query.return_value = {"documents": [["lore1", "lore2"]], "distances": [[0.05, 0.1]]}
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = mock_col
+
+    class DummyPull:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {}
+
+    class DummyGen:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"response": "tag1, tag2"}
+
+    def post_side_effect(url, *args, **kwargs):
+        if url.endswith("/api/pull"):
+            return DummyPull()
+        return DummyGen()
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.requests.get") as mock_get, \
+            patch("tagging.requests.post", side_effect=post_side_effect), \
+            patch("tagging.count_tokens", side_effect=lambda text, model=None: len(text)):
+        mock_get.return_value.raise_for_status = lambda: None
+        mock_get.return_value.json.return_value = {"models": []}
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
+
+    rows = list(csv.reader(open(out_csv)))
+    filenames = {r[0] for r in rows[1:]}
+    # nested archives discovered, stored as forward-slash relative paths, and
+    # the basename collision is preserved as two distinct rows
+    assert filenames == {"top.stl", "sub_a/Model.stl", "sub_b/Model.stl"}
+
+
 def test_rerank(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     zips = tmp_path / "zips"

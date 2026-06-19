@@ -292,6 +292,28 @@ def test_run_upload_stages_missing_models_and_scans(tmp_path, monkeypatch):
     client.update_model.assert_not_called()
 
 
+def test_run_upload_resolves_nested_relative_path_source(tmp_path, monkeypatch):
+    # tag writes the CSV filename as a path relative to --zips; upload must
+    # join it back onto --zips to find a source in a subfolder.
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    (zips / "sub").mkdir(parents=True)
+    (zips / "sub" / "Sister Superior.stl").write_text("mesh")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "sub/Sister Superior.stl", "faction": "Adepta Sororitas"},
+    ])
+    client = _fake_client()
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library))
+
+    # staged under the final-component name (subfolder stripped), tags carried
+    assert (library / "Sister Superior" / "datapackage.json").exists()
+    client.trigger_scan.assert_called_once()
+
+
 def test_run_upload_delete_source_removes_archive_after_staging(tmp_path, monkeypatch):
     monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
     monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
