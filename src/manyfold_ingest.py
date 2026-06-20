@@ -114,12 +114,39 @@ def _model_dir_name(filename: str) -> str:
     return " ".join(words) or slugify(filename)
 
 
+def _flatten_into_root(root: Path) -> None:
+    """Move every file under ``root`` directly into ``root`` (no subfolders).
+
+    Manyfold treats each folder containing 3D files as one model and every
+    SUBFOLDER as a separate model, so an archive whose parts live in subfolders
+    (Supported/, Large Printers/, ...) fans out into many models. Flattening so
+    all files sit at the model folder's root makes Manyfold see exactly one
+    model per zip. Flattened names come from each file's path relative to root
+    (separators -> '_') so parts from different subfolders can't collide.
+    """
+    for p in [f for f in root.rglob("*") if f.is_file()]:
+        rel = p.relative_to(root)
+        if rel.parent == Path("."):
+            continue  # already at the root
+        flat = root / "_".join(rel.parts)
+        i = 1
+        while flat.exists():
+            flat = root / f"{i}_{'_'.join(rel.parts)}"
+            i += 1
+        shutil.move(str(p), str(flat))
+    # Drop the now-empty subdirectories (deepest first).
+    for d in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
+        d.rmdir()
+
+
 def stage_into_library(archive: Path, library_path: Path, tags: list[str]) -> Path:
     """Extract/copy a model's files into the Manyfold library folder.
 
     Archives are unpacked (a library scan won't look inside zips); loose
-    files are copied. A datapackage.json is written alongside so Manyfold
-    imports the tags at scan time.
+    files are copied. Extracted contents are flattened into a single folder so
+    Manyfold registers one model per zip (see ``_flatten_into_root``). A
+    datapackage.json is written alongside so Manyfold imports the tags at scan
+    time.
     """
     dest = library_path / _model_dir_name(archive.name)
     if dest.exists():
@@ -132,6 +159,7 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str]) -> Pa
         staging.mkdir()
         if ext in _ARCHIVE_EXTS:
             patoolib.extract_archive(str(archive), outdir=str(staging))
+            _flatten_into_root(staging)
         elif ext in _LOOSE_EXTS:
             shutil.copy(archive, staging / archive.name)
         else:

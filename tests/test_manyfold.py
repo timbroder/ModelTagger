@@ -223,6 +223,38 @@ def test_stage_into_library_loose_file(tmp_path):
     assert stage_into_library(archive, library, []) == dest
 
 
+def test_stage_into_library_flattens_nested_archive(tmp_path, monkeypatch):
+    # Manyfold makes one model per subfolder, so a staged archive must be
+    # flattened into a single flat folder => one model per zip.
+    archive = tmp_path / "Kit.zip"
+    archive.write_text("zip")
+    library = tmp_path / "library"
+
+    def fake_extract(src, outdir):
+        out = Path(outdir)
+        (out / "Supported").mkdir(parents=True)
+        (out / "Large Printers").mkdir(parents=True)
+        (out / "Supported" / "body.stl").write_text("a")
+        (out / "Large Printers" / "body.stl").write_text("b")  # same basename, diff folder
+        (out / "readme.txt").write_text("c")                   # already at root
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive", fake_extract)
+    dest = stage_into_library(archive, library, ["faction: Orks"])
+
+    assert dest == library / "Kit"
+    # no subdirectories survive: Manyfold sees one model
+    assert [p for p in dest.rglob("*") if p.is_dir()] == []
+    files = {p.name for p in dest.iterdir() if p.is_file()}
+    # nested parts flattened with collision-safe names; root file & datapackage kept
+    assert files == {
+        "Supported_body.stl", "Large Printers_body.stl", "readme.txt", "datapackage.json",
+    }
+    assert (dest / "Supported_body.stl").read_text() == "a"
+    assert (dest / "Large Printers_body.stl").read_text() == "b"
+    pkg = json.loads((dest / "datapackage.json").read_text())
+    assert pkg["keywords"] == ["faction: Orks"]
+
+
 # --- run_upload flows -----------------------------------------------------
 
 def _write_csv(tmp_path, rows):
