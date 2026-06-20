@@ -83,6 +83,24 @@ def test_model_dir_name_dedupes_doubled_words():
     assert _model_dir_name("Aveline.stl") == "Aveline"
 
 
+def test_staged_dir_names_disambiguates_basename_collisions():
+    from manyfold_ingest import _staged_dir_names
+    names = _staged_dir_names([
+        "General/Triarch Praetorians.zip",
+        "Finished scans/Triarch Praetorians.zip",
+        "Necrons/Lokhust.stl",  # unique basename -> stays clean
+        "",                      # ignored
+    ])
+    # colliding basenames disambiguated by their relative parent
+    assert names["General/Triarch Praetorians.zip"] == "Triarch Praetorians (General)"
+    assert names["Finished scans/Triarch Praetorians.zip"] == "Triarch Praetorians (Finished scans)"
+    # distinct sources -> distinct folders (neither silently dropped)
+    assert (names["General/Triarch Praetorians.zip"]
+            != names["Finished scans/Triarch Praetorians.zip"])
+    # non-colliding name is untouched
+    assert names["Necrons/Lokhust.stl"] == "Lokhust"
+
+
 def test_match_dedupes_doubled_filename():
     # Vendor "Name_Name+variant" pattern must match Manyfold's shorter name
     models = {normalize_name("Sister Superior"): {"id": 9, "name": "Sister Superior"}}
@@ -355,6 +373,33 @@ def test_run_upload_resolves_nested_relative_path_source(tmp_path, monkeypatch):
     # staged under the final-component name (subfolder stripped), tags carried
     assert (library / "Sister Superior" / "datapackage.json").exists()
     client.trigger_scan.assert_called_once()
+
+
+def test_run_upload_stages_same_basename_sources_to_distinct_folders(tmp_path, monkeypatch):
+    # Two different sources sharing a basename across --zips subfolders must
+    # each stage into their own folder, not silently collide on one.
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    (zips / "General").mkdir(parents=True)
+    (zips / "Finished scans").mkdir(parents=True)
+    (zips / "General" / "Execrator.stl").write_text("a")
+    (zips / "Finished scans" / "Execrator.stl").write_text("b")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "General/Execrator.stl", "faction": "Necrons"},
+        {"filename": "Finished scans/Execrator.stl", "faction": "Necrons"},
+    ])
+    client = _fake_client()
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library))
+
+    # both staged into distinct folders — neither dropped
+    assert (library / "Execrator (General)" / "datapackage.json").exists()
+    assert (library / "Execrator (Finished scans)" / "datapackage.json").exists()
+    assert (library / "Execrator (General)" / "Execrator.stl").read_text() == "a"
+    assert (library / "Execrator (Finished scans)" / "Execrator.stl").read_text() == "b"
 
 
 def test_run_upload_delete_source_removes_archive_after_staging(tmp_path, monkeypatch):
