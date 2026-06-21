@@ -196,6 +196,36 @@ def test_client_paginates_and_authenticates():
     assert headers["Authorization"] == "Bearer tok"
 
 
+def test_client_refreshes_token_on_401(monkeypatch):
+    # Long runs outlive the OAuth token TTL; a 401 must trigger a re-auth and
+    # one retry with the fresh token rather than bubbling up as an error.
+    monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
+    client = ManyfoldClient("https://mf.example", client_id="c", client_secret="s", min_interval=0)
+    with patch("manyfold.requests.post",
+               side_effect=[_resp(200, {"access_token": "T1"}),
+                            _resp(200, {"access_token": "T2"})]) as mock_post, \
+            patch("manyfold.requests.request",
+                  side_effect=[_resp(401), _resp(200, {"member": []})]) as mock_req:
+        assert client.list_models() == []
+    assert mock_post.call_count == 2  # initial token + one refresh
+    assert mock_req.call_count == 2   # 401, then retried
+    # the retry carried the refreshed token
+    assert mock_req.call_args_list[1].kwargs["headers"]["Authorization"] == "Bearer T2"
+
+
+def test_client_does_not_loop_on_persistent_401(monkeypatch):
+    # With no OAuth creds (static token) a 401 can't be refreshed; it returns
+    # rather than retrying forever.
+    monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
+    client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
+    with patch("manyfold.requests.request", return_value=_resp(401, {})) as mock_req:
+        try:
+            client.list_models()
+        except ManyfoldError:
+            pass
+    assert mock_req.call_count == 1  # no re-auth attempts
+
+
 def test_client_retries_on_429(monkeypatch):
     monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
     client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
@@ -271,6 +301,31 @@ def test_stage_into_library_flattens_nested_archive(tmp_path, monkeypatch):
     assert (dest / "Large Printers_body.stl").read_text() == "b"
     pkg = json.loads((dest / "datapackage.json").read_text())
     assert pkg["keywords"] == ["faction: Orks"]
+
+
+def test_stage_into_library_caps_overlong_flattened_names(tmp_path, monkeypatch):
+    # A deeply nested member would join into a >255-byte filename and raise
+    # ENAMETOOLONG; the name must be capped (hashed) while staying staged.
+    archive = tmp_path / "Kit.zip"
+    archive.write_text("zip")
+    library = tmp_path / "library"
+
+    deep = Path("A" * 60, "B" * 60, "C" * 60, "D" * 60)  # join ~243 chars
+
+    def fake_extract(src, outdir):
+        target = Path(outdir) / deep
+        target.mkdir(parents=True)
+        (target / "promo.png").write_text("x")
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive", fake_extract)
+    dest = stage_into_library(archive, library, ["faction: Orks"])
+
+    files = [p for p in dest.iterdir() if p.is_file() and p.name != "datapackage.json"]
+    assert len(files) == 1
+    f = files[0]
+    assert len(f.name.encode("utf-8")) <= 200  # within the filesystem limit
+    assert f.suffix == ".png"                   # extension preserved
+    assert f.read_text() == "x"                  # content staged, no error
 
 
 # --- run_upload flows -----------------------------------------------------

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -135,6 +136,29 @@ def _staged_dir_names(filenames: list[str]) -> dict[str, str]:
     return out
 
 
+# Stay well under the common 255-byte per-file filesystem limit so flattened
+# names from deeply nested archives don't raise ENAMETOOLONG.
+_MAX_NAME_BYTES = 200
+
+
+def _flat_name(rel: Path) -> str:
+    """A single filename for a nested path, joining its parts with '_'.
+
+    Deeply nested archives can produce a join longer than the filesystem's
+    255-byte per-file limit; such names are truncated and given a short hash of
+    the full relative path so they stay unique and within the limit, preserving
+    the extension.
+    """
+    name = "_".join(rel.parts)
+    if len(name.encode("utf-8")) <= _MAX_NAME_BYTES:
+        return name
+    suffix = rel.suffix
+    h = hashlib.sha1(str(rel).encode("utf-8")).hexdigest()[:10]
+    budget = _MAX_NAME_BYTES - len(suffix.encode("utf-8")) - len(h) - 1  # 1 for '_'
+    stem = name.encode("utf-8")[:max(0, budget)].decode("utf-8", "ignore")
+    return f"{stem}_{h}{suffix}"
+
+
 def _flatten_into_root(root: Path) -> None:
     """Move every file under ``root`` directly into ``root`` (no subfolders).
 
@@ -149,10 +173,10 @@ def _flatten_into_root(root: Path) -> None:
         rel = p.relative_to(root)
         if rel.parent == Path("."):
             continue  # already at the root
-        flat = root / "_".join(rel.parts)
+        flat = root / _flat_name(rel)
         i = 1
         while flat.exists():
-            flat = root / f"{i}_{'_'.join(rel.parts)}"
+            flat = root / f"{i}_{_flat_name(rel)}"
             i += 1
         shutil.move(str(p), str(flat))
     # Drop the now-empty subdirectories (deepest first).
