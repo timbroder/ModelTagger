@@ -15,7 +15,10 @@ from datetime import datetime, timezone
 import logging
 import re
 import requests
-from utils import slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS
+from utils import (
+    slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS,
+    ARCHIVE_EXTS, LOOSE_EXTS, TAGGABLE_EXTS, BAD_EXTS,
+)
 
 # Resolve config relative to the repo root so the CLI works from any cwd
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -53,9 +56,9 @@ def extract_to_temp(file_path: Path) -> Path | None:
     ext = file_path.suffix.lower()
 
     try:
-        if ext in [".zip", ".rar", ".7z"]:
+        if ext in ARCHIVE_EXTS:
             patoolib.extract_archive(str(file_path), outdir=str(temp_dir))
-        elif ext in [".stl", ".obj", ".png"]:
+        elif ext in LOOSE_EXTS:
             shutil.copy(file_path, temp_dir / file_path.name)
         else:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -68,16 +71,14 @@ def extract_to_temp(file_path: Path) -> Path | None:
     return temp_dir
 
 def is_valid_archive_content(folder: Path) -> bool:
-    """Check if folder contains valid 3D model files and no dangerous executables."""
-    allowed_exts = {".stl", ".obj", ".png"}
-    bad_exts = {".exe", ".bat", ".js", ".dll"}
+    """Check if folder contains supported model/image content and no executables."""
     files = list(folder.rglob("*"))
     if not files:
         return False
     for f in files:
-        if f.suffix.lower() in bad_exts:
+        if f.suffix.lower() in BAD_EXTS:
             return False
-    return any(f.suffix.lower() in allowed_exts for f in files)
+    return any(f.suffix.lower() in LOOSE_EXTS for f in files)
 
 
 def candidate_slugs(words: list[str]) -> list[str]:
@@ -520,7 +521,7 @@ def run_tagging(
         for path in Path(zips_dir).rglob("*"):
             if not path.is_file():
                 continue
-            if path.suffix.lower() not in [".zip", ".rar", ".7z", ".stl", ".obj", ".png"]:
+            if path.suffix.lower() not in TAGGABLE_EXTS:
                 continue
             # Store the path RELATIVE to --zips as the CSV filename: this makes
             # discovery recursive (nested incoming libraries get tagged) and

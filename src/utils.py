@@ -53,6 +53,50 @@ _JUNK_TOKENS = {
 }
 
 
+# --- Supported file formats ------------------------------------------------
+# Mirrors Manyfold's supported set (https://manyfold.app/manual/supported_formats.html)
+# so the tagger discovers and stages anything Manyfold can index.
+
+# 3D mesh / CAD model formats.
+MESH_EXTS = frozenset({
+    ".splat", ".spz", ".3ds", ".max", ".3mf", ".amf", ".abc", ".dwg", ".dxf",
+    ".iam", ".ipt", ".brep", ".blend", ".jas", ".gml", ".dae", ".dcm", ".x",
+    ".drc", ".fbx", ".fcstd", ".f3d", ".f3z", ".gltf", ".glb", ".hfp", ".iges",
+    ".igs", ".ifc", ".ldr", ".mpd", ".ma", ".mb", ".mix", ".mha", ".mhd",
+    ".lxo", ".nrrd", ".nhdr", ".off", ".xbf", ".scad", ".ply", ".pts", ".mdl",
+    ".step", ".stp", ".stl", ".skp", ".sldprt", ".spm", ".wrl", ".vtk", ".vtp",
+    ".vtu", ".vti", ".vtr", ".vts", ".obj", ".mtl", ".x3d",
+})
+
+# Slicer / print-project formats (ChiTuBox, Lychee, gcode, ...).
+SLICER_EXTS = frozenset({".chitubox", ".ctb", ".voxl", ".gcode", ".lys", ".lyt"})
+
+# Raster/vector image formats (renders, references).
+IMAGE_EXTS = frozenset({
+    ".bmp", ".gif", ".jpg", ".jpeg", ".jpe", ".pjpeg", ".png", ".svg",
+    ".tiff", ".tif", ".webp",
+})
+
+# Archive/container formats we can unpack.
+ARCHIVE_EXTS = frozenset({".zip", ".rar", ".7z", ".gz", ".gzip", ".bz2"})
+
+# Anything that makes a file/archive a printable model.
+MODEL_EXTS = MESH_EXTS | SLICER_EXTS
+
+# Loose files worth discovering, tagging, and staging on their own (a model or
+# its render). Documents/video/PCB files aren't standalone models, but ride
+# along inside archives when present.
+LOOSE_EXTS = MODEL_EXTS | IMAGE_EXTS
+
+# Loose files plus archives — everything the tag step walks --zips for.
+TAGGABLE_EXTS = LOOSE_EXTS | ARCHIVE_EXTS
+
+# Executables never belong in a model archive — reject archives containing them.
+BAD_EXTS = frozenset({
+    ".exe", ".bat", ".cmd", ".com", ".msi", ".scr", ".js", ".dll", ".sh", ".ps1",
+})
+
+
 def filter_query_tokens(words: list[str]) -> list[str]:
     """Drop filename tokens that carry no lore signal: print-prep words,
     anything with digits (versions, dates, print-farm suffixes), and
