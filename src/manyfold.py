@@ -141,6 +141,7 @@ class ManyfoldClient:
             kwargs["data"] = json.dumps(kwargs.pop("json"))
         headers["Authorization"] = f"Bearer {self._ensure_token()}"
         last_status = None
+        reauthed = False
         for attempt in range(retries):
             with self._rate_lock:
                 fire_at = max(time.time(), self._last_request + self._min_interval)
@@ -153,6 +154,14 @@ class ManyfoldClient:
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 last_status = str(e)
                 time.sleep(min(30, 2 * 2 ** attempt))
+                continue
+            # Long runs outlive the OAuth token's TTL — on a 401, drop the
+            # cached token, re-authenticate once, and retry with a fresh one.
+            if (resp.status_code == 401 and not reauthed
+                    and self._client_id and self._client_secret):
+                self._token = None
+                headers["Authorization"] = f"Bearer {self._ensure_token()}"
+                reauthed = True
                 continue
             if resp.status_code == 429 or resp.status_code >= 500:
                 last_status = resp.status_code

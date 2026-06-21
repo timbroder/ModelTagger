@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
+from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -114,14 +116,86 @@ def _model_dir_name(filename: str) -> str:
     return " ".join(words) or slugify(filename)
 
 
-def stage_into_library(archive: Path, library_path: Path, tags: list[str]) -> Path:
+def _staged_dir_names(filenames: list[str]) -> dict[str, str]:
+    """Map each CSV filename to a unique staged-folder name.
+
+    Since --zips is recursive, two different sources can share a basename
+    (e.g. 'General/Foo.zip' and 'Finished scans/Foo.zip'), which both reduce to
+    the same _model_dir_name and would collide on one staged folder — silently
+    dropping all but the first. Colliding names are disambiguated with their
+    relative parent path ('Foo (General)' vs 'Foo (Finished scans)'); the full
+    relative path is unique, so distinct sources always get distinct folders.
+    Non-colliding names stay clean.
+    """
+    base = {f: _model_dir_name(Path(f).name) for f in filenames if f}
+    counts = Counter(base.values())
+    out: dict[str, str] = {}
+    for f, b in base.items():
+        parent = " ".join(Path(f).parent.parts)
+        out[f] = f"{b} ({parent})" if counts[b] > 1 and parent else b
+    return out
+
+
+# Stay well under the common 255-byte per-file filesystem limit so flattened
+# names from deeply nested archives don't raise ENAMETOOLONG.
+_MAX_NAME_BYTES = 200
+
+
+def _flat_name(rel: Path) -> str:
+    """A single filename for a nested path, joining its parts with '_'.
+
+    Deeply nested archives can produce a join longer than the filesystem's
+    255-byte per-file limit; such names are truncated and given a short hash of
+    the full relative path so they stay unique and within the limit, preserving
+    the extension.
+    """
+    name = "_".join(rel.parts)
+    if len(name.encode("utf-8")) <= _MAX_NAME_BYTES:
+        return name
+    suffix = rel.suffix
+    h = hashlib.sha1(str(rel).encode("utf-8")).hexdigest()[:10]
+    budget = _MAX_NAME_BYTES - len(suffix.encode("utf-8")) - len(h) - 1  # 1 for '_'
+    stem = name.encode("utf-8")[:max(0, budget)].decode("utf-8", "ignore")
+    return f"{stem}_{h}{suffix}"
+
+
+def _flatten_into_root(root: Path) -> None:
+    """Move every file under ``root`` directly into ``root`` (no subfolders).
+
+    Manyfold treats each folder containing 3D files as one model and every
+    SUBFOLDER as a separate model, so an archive whose parts live in subfolders
+    (Supported/, Large Printers/, ...) fans out into many models. Flattening so
+    all files sit at the model folder's root makes Manyfold see exactly one
+    model per zip. Flattened names come from each file's path relative to root
+    (separators -> '_') so parts from different subfolders can't collide.
+    """
+    for p in [f for f in root.rglob("*") if f.is_file()]:
+        rel = p.relative_to(root)
+        if rel.parent == Path("."):
+            continue  # already at the root
+        flat = root / _flat_name(rel)
+        i = 1
+        while flat.exists():
+            flat = root / f"{i}_{_flat_name(rel)}"
+            i += 1
+        shutil.move(str(p), str(flat))
+    # Drop the now-empty subdirectories (deepest first).
+    for d in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
+        d.rmdir()
+
+
+def stage_into_library(archive: Path, library_path: Path, tags: list[str],
+                       dest_name: str | None = None) -> Path:
     """Extract/copy a model's files into the Manyfold library folder.
 
     Archives are unpacked (a library scan won't look inside zips); loose
-    files are copied. A datapackage.json is written alongside so Manyfold
-    imports the tags at scan time.
+    files are copied. Extracted contents are flattened into a single folder so
+    Manyfold registers one model per zip (see ``_flatten_into_root``). A
+    datapackage.json is written alongside so Manyfold imports the tags at scan
+    time. ``dest_name`` overrides the staged folder name so callers can avoid
+    basename collisions across --zips subfolders (see ``_staged_dir_names``).
     """
-    dest = library_path / _model_dir_name(archive.name)
+    dest = library_path / (dest_name or _model_dir_name(archive.name))
     if dest.exists():
         return dest  # already staged on a previous run
 
@@ -132,6 +206,7 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str]) -> Pa
         staging.mkdir()
         if ext in _ARCHIVE_EXTS:
             patoolib.extract_archive(str(archive), outdir=str(staging))
+            _flatten_into_root(staging)
         elif ext in _LOOSE_EXTS:
             shutil.copy(archive, staging / archive.name)
         else:
@@ -196,6 +271,10 @@ def run_upload(
 
     with open(csv_path, newline="") as f:
         rows = list(csv.DictReader(f))
+
+    # Unique staged-folder name per source so same-basename files in different
+    # --zips subfolders don't collide on one folder (dropping all but the first).
+    staged_names = _staged_dir_names([r.get("filename", "") for r in rows])
 
     print(f"Loaded {len(rows)} rows from {csv_path}; fetching Manyfold state...")
     models = client.list_models()
@@ -273,7 +352,8 @@ def run_upload(
                     extra = " then delete source" if delete_source else ""
                     print(f"[DRY RUN] would stage {filename} into {library} with {len(tags)} tags{extra}")
                 else:
-                    stage_into_library(source, library, tags)
+                    stage_into_library(source, library, tags,
+                                       dest_name=staged_names.get(filename))
                     staged_any = True
                     # Only remove the source AFTER a successful stage into B.
                     if delete_source:

@@ -83,6 +83,24 @@ def test_model_dir_name_dedupes_doubled_words():
     assert _model_dir_name("Aveline.stl") == "Aveline"
 
 
+def test_staged_dir_names_disambiguates_basename_collisions():
+    from manyfold_ingest import _staged_dir_names
+    names = _staged_dir_names([
+        "General/Triarch Praetorians.zip",
+        "Finished scans/Triarch Praetorians.zip",
+        "Necrons/Lokhust.stl",  # unique basename -> stays clean
+        "",                      # ignored
+    ])
+    # colliding basenames disambiguated by their relative parent
+    assert names["General/Triarch Praetorians.zip"] == "Triarch Praetorians (General)"
+    assert names["Finished scans/Triarch Praetorians.zip"] == "Triarch Praetorians (Finished scans)"
+    # distinct sources -> distinct folders (neither silently dropped)
+    assert (names["General/Triarch Praetorians.zip"]
+            != names["Finished scans/Triarch Praetorians.zip"])
+    # non-colliding name is untouched
+    assert names["Necrons/Lokhust.stl"] == "Lokhust"
+
+
 def test_match_dedupes_doubled_filename():
     # Vendor "Name_Name+variant" pattern must match Manyfold's shorter name
     models = {normalize_name("Sister Superior"): {"id": 9, "name": "Sister Superior"}}
@@ -178,6 +196,36 @@ def test_client_paginates_and_authenticates():
     assert headers["Authorization"] == "Bearer tok"
 
 
+def test_client_refreshes_token_on_401(monkeypatch):
+    # Long runs outlive the OAuth token TTL; a 401 must trigger a re-auth and
+    # one retry with the fresh token rather than bubbling up as an error.
+    monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
+    client = ManyfoldClient("https://mf.example", client_id="c", client_secret="s", min_interval=0)
+    with patch("manyfold.requests.post",
+               side_effect=[_resp(200, {"access_token": "T1"}),
+                            _resp(200, {"access_token": "T2"})]) as mock_post, \
+            patch("manyfold.requests.request",
+                  side_effect=[_resp(401), _resp(200, {"member": []})]) as mock_req:
+        assert client.list_models() == []
+    assert mock_post.call_count == 2  # initial token + one refresh
+    assert mock_req.call_count == 2   # 401, then retried
+    # the retry carried the refreshed token
+    assert mock_req.call_args_list[1].kwargs["headers"]["Authorization"] == "Bearer T2"
+
+
+def test_client_does_not_loop_on_persistent_401(monkeypatch):
+    # With no OAuth creds (static token) a 401 can't be refreshed; it returns
+    # rather than retrying forever.
+    monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
+    client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
+    with patch("manyfold.requests.request", return_value=_resp(401, {})) as mock_req:
+        try:
+            client.list_models()
+        except ManyfoldError:
+            pass
+    assert mock_req.call_count == 1  # no re-auth attempts
+
+
 def test_client_retries_on_429(monkeypatch):
     monkeypatch.setattr("manyfold.time.sleep", lambda s: None)
     client = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
@@ -221,6 +269,63 @@ def test_stage_into_library_loose_file(tmp_path):
 
     # Re-staging is a no-op (resume)
     assert stage_into_library(archive, library, []) == dest
+
+
+def test_stage_into_library_flattens_nested_archive(tmp_path, monkeypatch):
+    # Manyfold makes one model per subfolder, so a staged archive must be
+    # flattened into a single flat folder => one model per zip.
+    archive = tmp_path / "Kit.zip"
+    archive.write_text("zip")
+    library = tmp_path / "library"
+
+    def fake_extract(src, outdir):
+        out = Path(outdir)
+        (out / "Supported").mkdir(parents=True)
+        (out / "Large Printers").mkdir(parents=True)
+        (out / "Supported" / "body.stl").write_text("a")
+        (out / "Large Printers" / "body.stl").write_text("b")  # same basename, diff folder
+        (out / "readme.txt").write_text("c")                   # already at root
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive", fake_extract)
+    dest = stage_into_library(archive, library, ["faction: Orks"])
+
+    assert dest == library / "Kit"
+    # no subdirectories survive: Manyfold sees one model
+    assert [p for p in dest.rglob("*") if p.is_dir()] == []
+    files = {p.name for p in dest.iterdir() if p.is_file()}
+    # nested parts flattened with collision-safe names; root file & datapackage kept
+    assert files == {
+        "Supported_body.stl", "Large Printers_body.stl", "readme.txt", "datapackage.json",
+    }
+    assert (dest / "Supported_body.stl").read_text() == "a"
+    assert (dest / "Large Printers_body.stl").read_text() == "b"
+    pkg = json.loads((dest / "datapackage.json").read_text())
+    assert pkg["keywords"] == ["faction: Orks"]
+
+
+def test_stage_into_library_caps_overlong_flattened_names(tmp_path, monkeypatch):
+    # A deeply nested member would join into a >255-byte filename and raise
+    # ENAMETOOLONG; the name must be capped (hashed) while staying staged.
+    archive = tmp_path / "Kit.zip"
+    archive.write_text("zip")
+    library = tmp_path / "library"
+
+    deep = Path("A" * 60, "B" * 60, "C" * 60, "D" * 60)  # join ~243 chars
+
+    def fake_extract(src, outdir):
+        target = Path(outdir) / deep
+        target.mkdir(parents=True)
+        (target / "promo.png").write_text("x")
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive", fake_extract)
+    dest = stage_into_library(archive, library, ["faction: Orks"])
+
+    files = [p for p in dest.iterdir() if p.is_file() and p.name != "datapackage.json"]
+    assert len(files) == 1
+    f = files[0]
+    assert len(f.name.encode("utf-8")) <= 200  # within the filesystem limit
+    assert f.suffix == ".png"                   # extension preserved
+    assert f.read_text() == "x"                  # content staged, no error
 
 
 # --- run_upload flows -----------------------------------------------------
@@ -323,6 +428,33 @@ def test_run_upload_resolves_nested_relative_path_source(tmp_path, monkeypatch):
     # staged under the final-component name (subfolder stripped), tags carried
     assert (library / "Sister Superior" / "datapackage.json").exists()
     client.trigger_scan.assert_called_once()
+
+
+def test_run_upload_stages_same_basename_sources_to_distinct_folders(tmp_path, monkeypatch):
+    # Two different sources sharing a basename across --zips subfolders must
+    # each stage into their own folder, not silently collide on one.
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"
+    (zips / "General").mkdir(parents=True)
+    (zips / "Finished scans").mkdir(parents=True)
+    (zips / "General" / "Execrator.stl").write_text("a")
+    (zips / "Finished scans" / "Execrator.stl").write_text("b")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "General/Execrator.stl", "faction": "Necrons"},
+        {"filename": "Finished scans/Execrator.stl", "faction": "Necrons"},
+    ])
+    client = _fake_client()
+
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library))
+
+    # both staged into distinct folders — neither dropped
+    assert (library / "Execrator (General)" / "datapackage.json").exists()
+    assert (library / "Execrator (Finished scans)" / "datapackage.json").exists()
+    assert (library / "Execrator (General)" / "Execrator.stl").read_text() == "a"
+    assert (library / "Execrator (Finished scans)" / "Execrator.stl").read_text() == "b"
 
 
 def test_run_upload_delete_source_removes_archive_after_staging(tmp_path, monkeypatch):
