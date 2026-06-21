@@ -5,6 +5,40 @@ import sys
 sys.path.append('src')
 
 
+def test_supported_formats_mirror_manyfold():
+    import utils
+    # slicer/print-project + extra mesh formats Manyfold supports
+    for ext in (".chitubox", ".ctb", ".lys", ".lyt", ".voxl", ".gcode"):
+        assert ext in utils.SLICER_EXTS and ext in utils.LOOSE_EXTS
+    for ext in (".3mf", ".ply", ".step", ".stp", ".gltf", ".glb", ".fbx", ".obj", ".stl"):
+        assert ext in utils.MESH_EXTS and ext in utils.LOOSE_EXTS
+    for ext in (".jpg", ".jpeg", ".webp", ".tiff", ".png"):
+        assert ext in utils.IMAGE_EXTS and ext in utils.LOOSE_EXTS
+    for ext in (".zip", ".rar", ".7z", ".gz", ".bz2"):
+        assert ext in utils.ARCHIVE_EXTS and ext in utils.TAGGABLE_EXTS
+
+
+def test_is_valid_archive_content_accepts_slicer_and_meshes(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    from tagging import is_valid_archive_content
+
+    chitubox = tmp_path / "chitubox"; chitubox.mkdir()
+    (chitubox / "model.chitubox").write_text("x")
+    assert is_valid_archive_content(chitubox)  # was "no valid content" before
+
+    mesh = tmp_path / "mesh"; mesh.mkdir()
+    (mesh / "kit.3mf").write_text("x")
+    assert is_valid_archive_content(mesh)
+
+    danger = tmp_path / "danger"; danger.mkdir()
+    (danger / "kit.stl").write_text("x"); (danger / "virus.exe").write_text("x")
+    assert not is_valid_archive_content(danger)  # executables reject the archive
+
+    docs_only = tmp_path / "docs"; docs_only.mkdir()
+    (docs_only / "readme.md").write_text("x")
+    assert not is_valid_archive_content(docs_only)  # no model content
+
+
 def test_parse_tags_examples(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     from tagging import parse_tags

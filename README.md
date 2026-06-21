@@ -34,8 +34,8 @@ You provide two inputs that are not checked in:
 
 - a **seeds file** — one wiki URL per line (generate one with the
   `tools/` scripts, see below)
-- a folder of **miniature files** to tag (`.zip`, `.rar`, `.7z` archives or
-  loose `.stl`, `.obj`, `.png` files)
+- a folder of **miniature files** to tag — archives (`.zip`, `.rar`, `.7z`, …) or
+  loose model/slicer/image files (see [Supported Inputs](#-supported-inputs))
 
 ## 🛠 Setup
 
@@ -286,8 +286,18 @@ How the sync works:
 
 ## 🔁 Supported Inputs
 
-- `.zip`, `.rar`, `.7z` archives
-- `.stl`, `.obj`, `.png` loose files
+Mirrors [Manyfold's supported formats](https://manyfold.app/manual/supported_formats.html)
+(centralized in `utils.py`):
+
+- **Archives**: `.zip`, `.rar`, `.7z`, `.gz`, `.gzip`, `.bz2`
+- **3D meshes**: `.stl`, `.obj`, `.3mf`, `.ply`, `.step`/`.stp`, `.gltf`/`.glb`,
+  `.fbx`, `.dae`, `.3ds`, `.blend`, `.scad`, `.off`, `.wrl`, `.x3d`, … (full mesh list)
+- **Slicer/print projects**: `.chitubox`, `.ctb`, `.lys`, `.lyt`, `.voxl`, `.gcode`
+- **Images**: `.png`, `.jpg`/`.jpeg`, `.gif`, `.bmp`, `.tiff`/`.tif`, `.webp`, `.svg`
+
+An archive is tagged if it contains at least one of these (and no executables).
+Loose documents/video/PCB files aren't treated as standalone models, but ride
+along inside archives.
 
 ---
 

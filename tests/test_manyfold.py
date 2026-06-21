@@ -271,6 +271,21 @@ def test_stage_into_library_loose_file(tmp_path):
     assert stage_into_library(archive, library, []) == dest
 
 
+def test_stage_into_library_loose_slicer_file(tmp_path):
+    # A loose ChiTuBox project is a supported format now, so it stages like any
+    # other loose model file.
+    archive = tmp_path / "Marine.ctb"
+    archive.write_text("sliced")
+    library = tmp_path / "library"
+
+    dest = stage_into_library(archive, library, ["faction: Space Marines"])
+
+    assert dest == library / "Marine"
+    assert (dest / "Marine.ctb").exists()
+    pkg = json.loads((dest / "datapackage.json").read_text())
+    assert pkg["keywords"] == ["faction: Space Marines"]
+
+
 def test_stage_into_library_flattens_nested_archive(tmp_path, monkeypatch):
     # Manyfold makes one model per subfolder, so a staged archive must be
     # flattened into a single flat folder => one model per zip.

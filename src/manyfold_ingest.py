@@ -15,7 +15,10 @@ import patoolib
 from tqdm import tqdm
 
 from manyfold import ManyfoldClient, ManyfoldError, model_tags
-from utils import slugify, clean_file_name, filter_query_tokens
+from utils import (
+    slugify, clean_file_name, filter_query_tokens,
+    ARCHIVE_EXTS as _ARCHIVE_EXTS, LOOSE_EXTS as _LOOSE_EXTS,
+)
 
 # Structured fields owned by this pipeline across all modes — namespaced tags
 # with these prefixes are replaced on re-runs; everything else (manual tags
@@ -30,8 +33,7 @@ OWNED_NAMESPACES = [
 # worse than leaving one untagged.
 _MATCH_RATIO = 0.92
 
-_ARCHIVE_EXTS = {".zip", ".rar", ".7z"}
-_LOOSE_EXTS = {".stl", ".obj", ".png"}
+# _ARCHIVE_EXTS / _LOOSE_EXTS are imported from utils (Manyfold's supported set).
 
 
 def build_tags(row: dict) -> list[str]:
