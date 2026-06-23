@@ -104,6 +104,8 @@ def test_staged_dir_names_disambiguates_basename_collisions():
 def test_model_dir_name_strips_multipart_suffix():
     assert _model_dir_name("Krieg.part01.rar") == "Krieg"
     assert _model_dir_name("Lesionaries (Supported).part2.rar") == "Lesionaries Supported"
+    # split 7z set: the .7z.NNN collapses to the base name
+    assert _model_dir_name("Grey Knights.7z.001") == "Grey Knights"
     # "Part 3" (space, single .rar) is a name, not a volume marker
     assert _model_dir_name("Tyranid Warriors Part 3.rar") == "Tyranid Warriors Part 3"
 
@@ -477,6 +479,34 @@ def test_run_upload_skips_continuation_rar_volumes(tmp_path, monkeypatch):
     # exactly one model, named after the set (no ".part01"), no second volume
     assert [p.name for p in library.iterdir()] == ["Krieg"]
     assert (library / "Krieg" / "datapackage.json").exists()
+
+
+def test_run_upload_stages_split_7z_first_volume(tmp_path, monkeypatch):
+    # A split 7z set stages once via .001 (extracted via patoolib by content),
+    # named after the base; the .002 continuation row is skipped.
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"; zips.mkdir()
+    (zips / "Grey Knights.7z.001").write_text("a")
+    (zips / "Grey Knights.7z.002").write_text("b")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "Grey Knights.7z.001", "faction": "Grey Knights"},
+        {"filename": "Grey Knights.7z.002", "faction": "Grey Knights"},  # continuation -> skip
+    ])
+    client = _fake_client()
+
+    extracted = []
+    def fake_extract(src, outdir):
+        extracted.append(Path(src).name)
+        Path(outdir, "m.stl").write_text("mesh")
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive", fake_extract)
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library))
+
+    assert extracted == ["Grey Knights.7z.001"]  # only the first volume
+    assert [p.name for p in library.iterdir()] == ["Grey Knights"]
 
 
 def test_run_upload_stages_same_basename_sources_to_distinct_folders(tmp_path, monkeypatch):

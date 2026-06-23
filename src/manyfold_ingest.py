@@ -208,7 +208,9 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str],
     try:
         staging = tmp / "model"
         staging.mkdir()
-        if ext in _ARCHIVE_EXTS:
+        # Archives, incl. a split set's first volume (e.g. .7z.001) whose ext
+        # isn't a recognized archive ext — patoolib detects it by content.
+        if ext in _ARCHIVE_EXTS or multipart_volume_number(archive.name) is not None:
             patoolib.extract_archive(str(archive), outdir=str(staging))
             _flatten_into_root(staging)
         elif ext in _LOOSE_EXTS:

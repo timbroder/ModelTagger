@@ -57,7 +57,9 @@ def extract_to_temp(file_path: Path) -> Path | None:
     ext = file_path.suffix.lower()
 
     try:
-        if ext in ARCHIVE_EXTS:
+        # Archives (incl. a split set's first volume, e.g. .7z.001, whose ext
+        # isn't .7z — patoolib detects the type by content and pulls the set).
+        if ext in ARCHIVE_EXTS or multipart_volume_number(file_path.name) is not None:
             patoolib.extract_archive(str(file_path), outdir=str(temp_dir))
         elif ext in LOOSE_EXTS:
             shutil.copy(file_path, temp_dir / file_path.name)
@@ -529,12 +531,16 @@ def run_tagging(
         for path in Path(zips_dir).rglob("*"):
             if not path.is_file():
                 continue
-            if path.suffix.lower() not in TAGGABLE_EXTS:
-                continue
-            # A multi-part RAR set is one model: process only the first volume
-            # (unrar pulls the rest from its siblings), skip continuations.
+            # A multi-volume set (name.partN.rar or split name.<ext>.NNN) is one
+            # model: process only the first volume (the archiver pulls the rest
+            # from its siblings) and skip continuations. The first volume of a
+            # split set (e.g. .7z.001) has a non-archive ext, so it's accepted
+            # here rather than via TAGGABLE_EXTS.
             vol = multipart_volume_number(path.name)
-            if vol is not None and vol != 1:
+            if vol is not None:
+                if vol != 1:
+                    continue
+            elif path.suffix.lower() not in TAGGABLE_EXTS:
                 continue
             # Store the path RELATIVE to --zips as the CSV filename: this makes
             # discovery recursive (nested incoming libraries get tagged) and

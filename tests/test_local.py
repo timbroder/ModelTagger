@@ -47,10 +47,17 @@ def test_multipart_helpers():
     assert utils.multipart_volume_number("Foo.rar") is None
     # "Part 3" (space) is a name, not a volume marker
     assert utils.multipart_volume_number("Tyranid Warriors Part 3.rar") is None
+    # split-archive sets: name.<ext>.NNN
+    assert utils.multipart_volume_number("Grey Knights.7z.001") == 1
+    assert utils.multipart_volume_number("Grey Knights.7z.002") == 2
+    assert utils.multipart_volume_number("Pirate Orc Boy Pack_2.7z.001") == 1
+    assert utils.multipart_volume_number("Foo.7z") is None  # single 7z, not a split
     assert utils.strip_multipart_suffix("Krieg.part01") == "Krieg"
     assert utils.strip_multipart_suffix("Lesionaries (Supported).part2") == "Lesionaries (Supported)"
+    assert utils.strip_multipart_suffix("Grey Knights.7z") == "Grey Knights"  # split stem
     assert utils.strip_multipart_suffix("no parts here") == "no parts here"
     assert utils.clean_file_name("Krieg.part01") == "Krieg"
+    assert utils.clean_file_name("Grey Knights.7z") == "Grey Knights"
 
 
 def test_tagging_processes_only_first_rar_volume(tmp_path, monkeypatch):
@@ -89,6 +96,43 @@ def test_tagging_processes_only_first_rar_volume(tmp_path, monkeypatch):
     assert extracted == ["Krieg.part1.rar"]
     rows = list(csv.reader(open(out_csv)))
     assert {r[0] for r in rows[1:]} == {"Krieg.part1.rar"}
+
+
+def test_tagging_processes_only_first_7z_volume(tmp_path, monkeypatch):
+    # A split 7z set (.7z.001 ... .NNN) is one model: only .001 is processed,
+    # even though its extension (.001) isn't a recognized archive ext.
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    zips = tmp_path / "zips"; zips.mkdir()
+    for n in ("001", "002", "003"):
+        (zips / f"Grey Knights.7z.{n}").write_text("7z")
+    out_csv = tmp_path / "tags.csv"; vector_path = tmp_path / "db"
+
+    mock_col = MagicMock()
+    mock_col.query.return_value = {"documents": [["lore"]], "distances": [[0.05]]}
+    mock_pc = MagicMock(); mock_pc.get_or_create_collection.return_value = mock_col
+
+    extracted = []
+    def fake_extract(p):
+        extracted.append(Path(p).name)
+        d = tmp_path / ("ex_" + Path(p).name); d.mkdir()
+        (d / "m.stl").write_text("mesh")
+        return d
+
+    class DummyGen:
+        def raise_for_status(self): pass
+        def json(self): return {"response": "tag1", "models": []}
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.extract_to_temp", side_effect=fake_extract), \
+            patch("tagging.requests.get", return_value=DummyGen()), \
+            patch("tagging.requests.post", return_value=DummyGen()), \
+            patch("tagging.count_tokens", side_effect=lambda t, model=None: len(t)):
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(vector_path), None, "warhammer", use_local=True)
+
+    assert extracted == ["Grey Knights.7z.001"]
+    rows = list(csv.reader(open(out_csv)))
+    assert {r[0] for r in rows[1:]} == {"Grey Knights.7z.001"}
 
 
 def test_parse_tags_examples(monkeypatch):

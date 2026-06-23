@@ -32,23 +32,39 @@ def is_article_url(url: str) -> bool:
     return not (ns in _NON_ARTICLE_NAMESPACES or ns.endswith("talk"))
 
 
-# Multi-part RAR volumes: name.part1.rar / name.part01.rar ... name.partN.rar.
-# unrar pulls the whole set from the FIRST volume, so we process only part 1,
-# skip the rest, and strip the .partN marker from derived model names. Note a
-# space ("Foo Part 3.rar") is a name, not a volume marker, so it's left alone.
-_MULTIPART_RE = re.compile(r"\.part(\d+)\.rar$", re.IGNORECASE)
+# Multi-volume archive members, two schemes:
+#   - RAR new-style:  name.part1.rar / name.part01.rar ... name.partN.rar
+#   - split archives: name.7z.001 / name.zip.001 / name.rar.001 ... .NNN
+# The archiver pulls the whole set from the FIRST volume (its siblings live
+# alongside), so we process only volume 1, skip the rest, and strip the volume
+# marker from derived model names. A space ("Foo Part 3.rar") is a name, not a
+# volume marker, so it's left alone.
+_MULTIPART_RE = re.compile(
+    r"(?:\.part(\d+)\.rar|\.(?:7z|zip|rar)\.(\d+))$", re.IGNORECASE
+)
 
 
 def multipart_volume_number(name: str) -> int | None:
-    """Volume number if ``name`` is a ``.partN.rar`` multi-volume member, else None."""
+    """Volume number if ``name`` is a multi-volume archive member, else None.
+
+    Handles ``name.partN.rar`` and split ``name.<ext>.NNN`` (7z/zip/rar) sets.
+    """
     m = _MULTIPART_RE.search(name)
-    return int(m.group(1)) if m else None
+    if not m:
+        return None
+    return int(m.group(1) or m.group(2))
 
 
 def strip_multipart_suffix(stem: str) -> str:
-    """Drop a trailing ``.partN`` volume marker from a filename stem
-    ('Krieg.part01' -> 'Krieg')."""
-    return re.sub(r"\.part\d+$", "", stem, flags=re.IGNORECASE)
+    """Drop a trailing volume marker from a filename stem.
+
+    'Krieg.part01' -> 'Krieg' (RAR new-style; the .rar is already gone from the
+    stem) and 'Grey Knights.7z' -> 'Grey Knights' (split ``.<ext>.NNN`` sets
+    leave the archive ext exposed in the stem after the .NNN is dropped).
+    """
+    stem = re.sub(r"\.part\d+$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"\.(?:7z|zip|rar)$", "", stem, flags=re.IGNORECASE)
+    return stem
 
 
 def clean_file_name(name: str) -> str:
