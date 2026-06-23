@@ -18,6 +18,7 @@ import requests
 from utils import (
     slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS,
     ARCHIVE_EXTS, LOOSE_EXTS, TAGGABLE_EXTS, BAD_EXTS,
+    multipart_volume_number,
 )
 
 # Resolve config relative to the repo root so the CLI works from any cwd
@@ -56,7 +57,9 @@ def extract_to_temp(file_path: Path) -> Path | None:
     ext = file_path.suffix.lower()
 
     try:
-        if ext in ARCHIVE_EXTS:
+        # Archives (incl. a split set's first volume, e.g. .7z.001, whose ext
+        # isn't .7z — patoolib detects the type by content and pulls the set).
+        if ext in ARCHIVE_EXTS or multipart_volume_number(file_path.name) is not None:
             patoolib.extract_archive(str(file_path), outdir=str(temp_dir))
         elif ext in LOOSE_EXTS:
             shutil.copy(file_path, temp_dir / file_path.name)
@@ -502,7 +505,14 @@ def run_tagging(
             # is retried; dedup prevents a re-run from doubling a filename.
             kept: dict[str, list] = {}
             for row in reader:
-                if row and any(cell.strip() for cell in row[1:]):
+                if not row:
+                    continue
+                # Drop stale continuation-volume rows (e.g. Krieg.part03.rar)
+                # written before multi-part handling; the set is one model now.
+                vol = multipart_volume_number(row[0])
+                if vol is not None and vol != 1:
+                    continue
+                if any(cell.strip() for cell in row[1:]):
                     kept[row[0]] = (row + [""]) if migrate_pad else row
         processed = set(kept)
         # Rewrite the cleaned CSV atomically before appending new rows.
@@ -521,7 +531,16 @@ def run_tagging(
         for path in Path(zips_dir).rglob("*"):
             if not path.is_file():
                 continue
-            if path.suffix.lower() not in TAGGABLE_EXTS:
+            # A multi-volume set (name.partN.rar or split name.<ext>.NNN) is one
+            # model: process only the first volume (the archiver pulls the rest
+            # from its siblings) and skip continuations. The first volume of a
+            # split set (e.g. .7z.001) has a non-archive ext, so it's accepted
+            # here rather than via TAGGABLE_EXTS.
+            vol = multipart_volume_number(path.name)
+            if vol is not None:
+                if vol != 1:
+                    continue
+            elif path.suffix.lower() not in TAGGABLE_EXTS:
                 continue
             # Store the path RELATIVE to --zips as the CSV filename: this makes
             # discovery recursive (nested incoming libraries get tagged) and

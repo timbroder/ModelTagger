@@ -18,6 +18,7 @@ from manyfold import ManyfoldClient, ManyfoldError, model_tags
 from utils import (
     slugify, clean_file_name, filter_query_tokens,
     ARCHIVE_EXTS as _ARCHIVE_EXTS, LOOSE_EXTS as _LOOSE_EXTS,
+    multipart_volume_number, strip_multipart_suffix,
 )
 
 # Structured fields owned by this pipeline across all modes — namespaced tags
@@ -101,7 +102,8 @@ def match_model(filename: str, models_by_slug: dict[str, dict]) -> dict | None:
 
 def _model_dir_name(filename: str) -> str:
     """A filesystem-safe, human-readable folder name for the model."""
-    stem = Path(filename).stem.replace("+", " ").replace("_", " ")
+    stem = strip_multipart_suffix(Path(filename).stem)  # 'Krieg.part01' -> 'Krieg'
+    stem = stem.replace("+", " ").replace("_", " ")
     stem = re.sub(r"[^0-9A-Za-z' \-]+", " ", stem)
     cleaned = re.sub(r"\s+", " ", stem).strip()
     # Dedupe repeated words case-insensitively (preserving first occurrence and
@@ -206,7 +208,9 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str],
     try:
         staging = tmp / "model"
         staging.mkdir()
-        if ext in _ARCHIVE_EXTS:
+        # Archives, incl. a split set's first volume (e.g. .7z.001) whose ext
+        # isn't a recognized archive ext — patoolib detects it by content.
+        if ext in _ARCHIVE_EXTS or multipart_volume_number(archive.name) is not None:
             patoolib.extract_archive(str(archive), outdir=str(staging))
             _flatten_into_root(staging)
         elif ext in _LOOSE_EXTS:
@@ -309,6 +313,12 @@ def run_upload(
             break
         filename = row.get("filename", "")
         if not filename:
+            continue
+        # A multi-part RAR set is staged via its first volume, which pulls in
+        # the siblings; skip continuation-volume rows (incl. stale ones from a
+        # pre-fix CSV) so we don't stage partial duplicates.
+        vol = multipart_volume_number(filename)
+        if vol is not None and vol != 1:
             continue
         tags = build_tags(row)
         try:
