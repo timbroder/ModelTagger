@@ -101,6 +101,13 @@ def test_staged_dir_names_disambiguates_basename_collisions():
     assert names["Necrons/Lokhust.stl"] == "Lokhust"
 
 
+def test_model_dir_name_strips_multipart_suffix():
+    assert _model_dir_name("Krieg.part01.rar") == "Krieg"
+    assert _model_dir_name("Lesionaries (Supported).part2.rar") == "Lesionaries Supported"
+    # "Part 3" (space, single .rar) is a name, not a volume marker
+    assert _model_dir_name("Tyranid Warriors Part 3.rar") == "Tyranid Warriors Part 3"
+
+
 def test_match_dedupes_doubled_filename():
     # Vendor "Name_Name+variant" pattern must match Manyfold's shorter name
     models = {normalize_name("Sister Superior"): {"id": 9, "name": "Sister Superior"}}
@@ -443,6 +450,33 @@ def test_run_upload_resolves_nested_relative_path_source(tmp_path, monkeypatch):
     # staged under the final-component name (subfolder stripped), tags carried
     assert (library / "Sister Superior" / "datapackage.json").exists()
     client.trigger_scan.assert_called_once()
+
+
+def test_run_upload_skips_continuation_rar_volumes(tmp_path, monkeypatch):
+    # A multi-part set stages once via its first volume; continuation-volume
+    # rows (incl. stale ones from a pre-fix CSV) are skipped.
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"; zips.mkdir()
+    (zips / "Krieg.part1.rar").write_text("a")
+    (zips / "Krieg.part2.rar").write_text("b")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [
+        {"filename": "Krieg.part1.rar", "faction": "Astra Militarum"},
+        {"filename": "Krieg.part2.rar", "faction": "Astra Militarum"},  # continuation -> skip
+    ])
+    client = _fake_client()
+
+    def fake_extract(src, outdir):
+        Path(outdir, "m.stl").write_text("mesh")
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive", fake_extract)
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library))
+
+    # exactly one model, named after the set (no ".part01"), no second volume
+    assert [p.name for p in library.iterdir()] == ["Krieg"]
+    assert (library / "Krieg" / "datapackage.json").exists()
 
 
 def test_run_upload_stages_same_basename_sources_to_distinct_folders(tmp_path, monkeypatch):

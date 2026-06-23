@@ -299,6 +299,10 @@ An archive is tagged if it contains at least one of these (and no executables).
 Loose documents/video/PCB files aren't treated as standalone models, but ride
 along inside archives.
 
+**Multi-part RAR sets** (`name.part1.rar … name.partN.rar`) are treated as one
+model: only the first volume is processed (it pulls in the rest), and the
+`.partN` marker is stripped from the model name.
+
 ---
 
 ## 🧪 Tests

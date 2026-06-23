@@ -18,6 +18,7 @@ import requests
 from utils import (
     slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS,
     ARCHIVE_EXTS, LOOSE_EXTS, TAGGABLE_EXTS, BAD_EXTS,
+    multipart_volume_number,
 )
 
 # Resolve config relative to the repo root so the CLI works from any cwd
@@ -502,7 +503,14 @@ def run_tagging(
             # is retried; dedup prevents a re-run from doubling a filename.
             kept: dict[str, list] = {}
             for row in reader:
-                if row and any(cell.strip() for cell in row[1:]):
+                if not row:
+                    continue
+                # Drop stale continuation-volume rows (e.g. Krieg.part03.rar)
+                # written before multi-part handling; the set is one model now.
+                vol = multipart_volume_number(row[0])
+                if vol is not None and vol != 1:
+                    continue
+                if any(cell.strip() for cell in row[1:]):
                     kept[row[0]] = (row + [""]) if migrate_pad else row
         processed = set(kept)
         # Rewrite the cleaned CSV atomically before appending new rows.
@@ -522,6 +530,11 @@ def run_tagging(
             if not path.is_file():
                 continue
             if path.suffix.lower() not in TAGGABLE_EXTS:
+                continue
+            # A multi-part RAR set is one model: process only the first volume
+            # (unrar pulls the rest from its siblings), skip continuations.
+            vol = multipart_volume_number(path.name)
+            if vol is not None and vol != 1:
                 continue
             # Store the path RELATIVE to --zips as the CSV filename: this makes
             # discovery recursive (nested incoming libraries get tagged) and

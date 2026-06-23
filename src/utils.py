@@ -32,8 +32,28 @@ def is_article_url(url: str) -> bool:
     return not (ns in _NON_ARTICLE_NAMESPACES or ns.endswith("talk"))
 
 
+# Multi-part RAR volumes: name.part1.rar / name.part01.rar ... name.partN.rar.
+# unrar pulls the whole set from the FIRST volume, so we process only part 1,
+# skip the rest, and strip the .partN marker from derived model names. Note a
+# space ("Foo Part 3.rar") is a name, not a volume marker, so it's left alone.
+_MULTIPART_RE = re.compile(r"\.part(\d+)\.rar$", re.IGNORECASE)
+
+
+def multipart_volume_number(name: str) -> int | None:
+    """Volume number if ``name`` is a ``.partN.rar`` multi-volume member, else None."""
+    m = _MULTIPART_RE.search(name)
+    return int(m.group(1)) if m else None
+
+
+def strip_multipart_suffix(stem: str) -> str:
+    """Drop a trailing ``.partN`` volume marker from a filename stem
+    ('Krieg.part01' -> 'Krieg')."""
+    return re.sub(r"\.part\d+$", "", stem, flags=re.IGNORECASE)
+
+
 def clean_file_name(name: str) -> str:
     """Remove dates, timestamps, and symbols from a filename stem."""
+    name = strip_multipart_suffix(name)  # 'Krieg.part01' -> 'Krieg'
     name = re.sub(r"\d{4}[-_\.]\d{2}[-_\.]\d{2}", " ", name)  # YYYY-MM-DD or similar
     name = re.sub(r"\d{2}[-_\.]\d{2}[-_\.]\d{4}", " ", name)  # DD-MM-YYYY or MM-DD-YYYY
     name = re.sub(r"\d{8,14}", " ", name)  # Compact dates or timestamps
