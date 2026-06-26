@@ -19,6 +19,7 @@ from utils import (
     slugify, clean_file_name, filter_query_tokens,
     ARCHIVE_EXTS as _ARCHIVE_EXTS, LOOSE_EXTS as _LOOSE_EXTS, BAD_EXTS,
     multipart_volume_number, strip_multipart_suffix, extract_nested_archives,
+    multipart_volume_siblings,
 )
 
 # Structured fields owned by this pipeline across all modes — namespaced tags
@@ -370,10 +371,13 @@ def run_upload(
                     stage_into_library(source, library, tags,
                                        dest_name=staged_names.get(filename))
                     staged_any = True
-                    # Only remove the source AFTER a successful stage into B.
+                    # Only remove the source AFTER a successful stage into B —
+                    # and remove every volume of a multi-part set, not just the
+                    # first (which would orphan its siblings on disk).
                     if delete_source:
-                        source.unlink()
-                        stats["deleted_source"] += 1
+                        for v in multipart_volume_siblings(source):
+                            v.unlink(missing_ok=True)
+                            stats["deleted_source"] += 1
                 stats["staged"] += 1
         except Exception as e:
             # One bad archive or API hiccup must not kill a thousands-row sync

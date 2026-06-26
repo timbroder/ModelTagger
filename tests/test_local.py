@@ -60,6 +60,52 @@ def test_multipart_helpers():
     assert utils.clean_file_name("Grey Knights.7z") == "Grey Knights"
 
 
+def test_multipart_volume_siblings(tmp_path):
+    from utils import multipart_volume_siblings
+    for n in (1, 2, 3):
+        (tmp_path / f"Krieg.part{n}.rar").write_text("x")
+    for n in ("001", "002"):
+        (tmp_path / f"GK.7z.{n}").write_text("x")
+    (tmp_path / "single.rar").write_text("x")
+
+    assert {p.name for p in multipart_volume_siblings(tmp_path / "Krieg.part1.rar")} == \
+        {"Krieg.part1.rar", "Krieg.part2.rar", "Krieg.part3.rar"}
+    assert {p.name for p in multipart_volume_siblings(tmp_path / "GK.7z.001")} == \
+        {"GK.7z.001", "GK.7z.002"}
+    # non-multipart -> just itself
+    assert multipart_volume_siblings(tmp_path / "single.rar") == [tmp_path / "single.rar"]
+
+
+def test_tagging_distinguishes_extract_fail_from_no_content(tmp_path, monkeypatch, caplog):
+    import logging
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    zips = tmp_path / "zips"; zips.mkdir()
+    (zips / "corrupt.zip").write_text("z")
+    (zips / "empty.zip").write_text("z")
+    out_csv = tmp_path / "tags.csv"; vp = tmp_path / "db"
+
+    mock_pc = MagicMock()
+    mock_pc.get_or_create_collection.return_value = MagicMock()
+
+    def fake_extract(p):
+        if Path(p).name == "corrupt.zip":
+            return None                                  # extraction failed
+        d = tmp_path / ("ex_" + Path(p).name); d.mkdir()
+        (d / "readme.txt").write_text("x")               # extracted, but no model file
+        return d
+
+    with patch("tagging.PersistentClient", return_value=mock_pc), \
+            patch("tagging.extract_to_temp", side_effect=fake_extract), \
+            patch("tagging.requests.get", return_value=MagicMock()), \
+            patch("tagging.requests.post", return_value=MagicMock()), \
+            caplog.at_level(logging.WARNING):
+        from tagging import run_tagging
+        run_tagging(str(zips), str(out_csv), str(vp), None, "warhammer", use_local=True)
+
+    assert "Extraction failed for corrupt.zip" in caplog.text      # corrupt-vs-empty split
+    assert "No model content for empty.zip" in caplog.text
+
+
 def test_tagging_processes_only_first_rar_volume(tmp_path, monkeypatch):
     # A multi-part RAR set is one model: only .part1 is tagged; continuation
     # volumes are skipped (the first volume pulls in the rest at extract time).

@@ -71,6 +71,25 @@ def strip_multipart_suffix(stem: str) -> str:
     return stem
 
 
+def multipart_volume_siblings(path: Path) -> list[Path]:
+    """Every volume file of the multi-volume set ``path`` belongs to (including
+    itself), or just ``[path]`` if it isn't a multi-volume member.
+
+    Lets --delete-source remove the whole set, not only the first volume (which
+    would orphan e.g. Krieg.part02.rar … or Grey Knights.7z.002 …).
+    """
+    m = _MULTIPART_RE.search(path.name)
+    if not m:
+        return [path]
+    prefix = re.escape(path.name[:m.start()])
+    if m.group(1) is not None:                       # name.partN.rar
+        pat = re.compile(rf"^{prefix}\.part\d+\.rar$", re.IGNORECASE)
+    else:                                            # name.<ext>.NNN
+        ext = re.escape(m.group(0).lstrip(".").split(".")[0])
+        pat = re.compile(rf"^{prefix}\.{ext}\.\d+$", re.IGNORECASE)
+    return sorted(p for p in path.parent.iterdir() if p.is_file() and pat.match(p.name))
+
+
 def clean_file_name(name: str) -> str:
     """Remove dates, timestamps, and symbols from a filename stem."""
     name = strip_multipart_suffix(name)  # 'Krieg.part01' -> 'Krieg'
