@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import logging
 import re
 import requests
+from tqdm import tqdm
 from utils import (
     slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS,
     ARCHIVE_EXTS, LOOSE_EXTS, TAGGABLE_EXTS, BAD_EXTS,
@@ -68,7 +69,10 @@ def extract_to_temp(file_path: Path) -> Path | None:
             shutil.rmtree(temp_dir, ignore_errors=True)
             return None
     except Exception as e:
+        # Surface the real cause (checksum error / unexpected end / missing
+        # volume / data error) so corrupt vs merely-empty is greppable in the log.
         print(f"Extraction failed: {e}")
+        logging.warning(f"Extraction error for {file_path.name}: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None
 
@@ -524,25 +528,29 @@ def run_tagging(
             w.writerows(kept.values())
         os.replace(tmp, output_csv)
 
+    # Discover everything to tag up front so the progress bar has a real total.
+    # A multi-volume set (name.partN.rar or split name.<ext>.NNN) is one model:
+    # process only the first volume (the archiver pulls the rest from its
+    # siblings) and skip continuations. The first volume of a split set (e.g.
+    # .7z.001) has a non-archive ext, so it's accepted here, not via TAGGABLE_EXTS.
+    discovered = []
+    for path in Path(zips_dir).rglob("*"):
+        if not path.is_file():
+            continue
+        vol = multipart_volume_number(path.name)
+        if vol is not None:
+            if vol != 1:
+                continue
+        elif path.suffix.lower() not in TAGGABLE_EXTS:
+            continue
+        discovered.append(path)
+
     with open(output_csv, 'a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(header)
 
-        for path in Path(zips_dir).rglob("*"):
-            if not path.is_file():
-                continue
-            # A multi-volume set (name.partN.rar or split name.<ext>.NNN) is one
-            # model: process only the first volume (the archiver pulls the rest
-            # from its siblings) and skip continuations. The first volume of a
-            # split set (e.g. .7z.001) has a non-archive ext, so it's accepted
-            # here rather than via TAGGABLE_EXTS.
-            vol = multipart_volume_number(path.name)
-            if vol is not None:
-                if vol != 1:
-                    continue
-            elif path.suffix.lower() not in TAGGABLE_EXTS:
-                continue
+        for path in tqdm(discovered, desc="Tagging", unit="file"):
             # Store the path RELATIVE to --zips as the CSV filename: this makes
             # discovery recursive (nested incoming libraries get tagged) and
             # collision-free (same-basename archives in different subfolders no
@@ -556,11 +564,17 @@ def run_tagging(
             temp_dir = None
             try:
                 temp_dir = extract_to_temp(path)
-                if not temp_dir or not is_valid_archive_content(temp_dir):
-                    # Not written to the CSV, so a re-run retries it (e.g. an
-                    # extractor was missing or the archive was re-downloaded).
-                    print(f"Skipping {rel_name} — could not extract / no valid content (will retry on re-run)")
-                    logging.warning(f"No valid content for {rel_name} (not written; retry on re-run)")
+                # Distinguish a hard extraction failure (corrupt/incomplete
+                # archive) from extracted-but-no-model-content, so the log gives
+                # a clean corrupt-vs-empty split. Neither writes a row, so both
+                # are retried on a re-run.
+                if temp_dir is None:
+                    tqdm.write(f"Skipping {rel_name} — could not extract (corrupt or incomplete archive)")
+                    logging.warning(f"Extraction failed for {rel_name} (corrupt/incomplete; retry on re-run)")
+                    continue
+                if not is_valid_archive_content(temp_dir):
+                    tqdm.write(f"Skipping {rel_name} — no model content (unsupported or nested archive)")
+                    logging.warning(f"No model content for {rel_name} (not written; retry on re-run)")
                     continue
 
                 # Put the base name (stem) of the file at the front, then add all contained names
@@ -618,7 +632,7 @@ def run_tagging(
                     metadatas = [None] * len(documents)
 
                 if not documents:
-                    print(f"Skipping {rel_name} — no lore found in vector DB (will retry on re-run)")
+                    tqdm.write(f"Skipping {rel_name} — no lore found in vector DB (will retry on re-run)")
                     logging.warning(f"No lore retrieved for {rel_name} (not written; retry on re-run)")
                     continue
 
@@ -671,7 +685,7 @@ def run_tagging(
                 def fallback():
                     # Generation failed (API error / "unknown"). Don't write a
                     # row so the file is retried on the next run.
-                    print(f"[Retry on re-run] Generation failed for {rel_name}")
+                    tqdm.write(f"[Retry on re-run] Generation failed for {rel_name}")
                     logging.warning(f"Generation failed for {rel_name} (not written; retry on re-run)")
 
                 if provider == "anthropic":
@@ -698,12 +712,12 @@ def run_tagging(
                 tagged_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 writer.writerow(make_row(rel_name, parsed, tagged_at=tagged_at))
                 processed.add(rel_name)
-                print(f"Tagged {rel_name} [{provider}] using {token_count} tokens")
+                tqdm.write(f"Tagged {rel_name} [{provider}] using {token_count} tokens")
                 logging.info(f"Tagged {rel_name} | Tokens: {token_count} | {provider} | {retrieval_diag}")
             except Exception as e:
                 # Unexpected failure — leave the file out of the CSV so a
                 # re-run retries it rather than stranding a blank row.
-                print(f"Error processing {rel_name} (will retry on re-run): {e}")
+                tqdm.write(f"Error processing {rel_name} (will retry on re-run): {e}")
                 logging.error(f"Tagging failed for {rel_name}: {e}")
             finally:
                 if temp_dir:

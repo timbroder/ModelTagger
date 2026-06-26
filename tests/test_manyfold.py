@@ -598,6 +598,26 @@ def test_run_upload_delete_source_removes_archive_after_staging(tmp_path, monkey
     assert not src.exists()                                             # source removed from A
 
 
+def test_run_upload_delete_source_removes_all_multipart_volumes(tmp_path, monkeypatch):
+    # --delete-source must remove every volume of a set, not just the first.
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    zips = tmp_path / "zips"; zips.mkdir()
+    for n in (1, 2, 3):
+        (zips / f"Krieg.part{n}.rar").write_text("x")
+    library = tmp_path / "library"
+    csv_path = _write_csv(tmp_path, [{"filename": "Krieg.part1.rar", "faction": "Astra Militarum"}])
+    client = _fake_client()
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive",
+                        lambda src, outdir: Path(outdir, "m.stl").write_text("mesh"))
+    with patch("manyfold_ingest.ManyfoldClient", return_value=client):
+        run_upload(str(csv_path), zips_dir=str(zips), library_path=str(library), delete_source=True)
+
+    assert (library / "Krieg" / "datapackage.json").exists()      # staged once
+    assert not any((zips / f"Krieg.part{n}.rar").exists() for n in (1, 2, 3))  # all volumes gone
+
+
 def test_run_upload_dry_run_keeps_source_even_with_delete_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
     monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")

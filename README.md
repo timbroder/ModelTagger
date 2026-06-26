@@ -211,6 +211,12 @@ API level rather than hoped for in a prompt.
   `config/tagging_presets.json`; `--prompt-override` replaces the prompt.
 - If generation fails, raw lore snippets are written as fallback tags and the
   failure is logged to `tagging.log`.
+- A **progress bar** (tqdm) shows overall tagging progress; per-file messages
+  print above it.
+- Skips are logged distinctly so corrupt vs empty are greppable in
+  `tagging.log`: `Extraction failed for …` (corrupt/incomplete archive),
+  `No model content for …` (extracted but nothing taggable), and
+  `Extraction error for … : <cause>` (the raw extractor message).
 
 ### 🏠 Local Mode (Ollama + bge-m3)
 
