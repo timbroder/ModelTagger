@@ -135,6 +135,45 @@ def test_tagging_processes_only_first_7z_volume(tmp_path, monkeypatch):
     assert {r[0] for r in rows[1:]} == {"Grey Knights.7z.001"}
 
 
+def test_extract_nested_archives_unpacks_and_recurses(tmp_path, monkeypatch):
+    import utils
+    root = tmp_path / "root"; root.mkdir()
+    (root / "level1.zip").write_text("z")     # outer bundle -> inner archive -> model
+    (root / "render.png").write_text("img")   # non-archive, kept
+
+    def fake_extract(src, outdir):
+        s = str(src)
+        if s.endswith("level1.zip"):
+            Path(outdir, "level2.zip").write_text("z")
+        elif s.endswith("level2.zip"):
+            Path(outdir, "deep.stl").write_text("mesh")
+    monkeypatch.setattr("utils.patoolib.extract_archive", fake_extract)
+
+    utils.extract_nested_archives(root)
+    names = {p.name for p in root.rglob("*") if p.is_file()}
+    assert "deep.stl" in names               # unpacked two levels deep
+    assert "render.png" in names             # untouched
+    assert not any(n.endswith((".zip", ".rar", ".7z")) for n in names)  # archives gone
+
+
+def test_extract_nested_archives_skips_corrupt(tmp_path, monkeypatch):
+    import utils
+    root = tmp_path / "root"; root.mkdir()
+    (root / "good.zip").write_text("z")
+    (root / "bad.rar").write_text("z")
+
+    def fake_extract(src, outdir):
+        if "bad" in str(src):
+            raise RuntimeError("Unexpected end of archive")
+        Path(outdir, "m.stl").write_text("mesh")
+    monkeypatch.setattr("utils.patoolib.extract_archive", fake_extract)
+
+    utils.extract_nested_archives(root)        # must not raise
+    names = {p.name for p in root.rglob("*") if p.is_file()}
+    assert "m.stl" in names                   # good one unpacked
+    assert "bad.rar" not in names             # corrupt one dropped, no infinite loop
+
+
 def test_parse_tags_examples(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     from tagging import parse_tags

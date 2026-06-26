@@ -295,6 +295,47 @@ def test_stage_into_library_loose_slicer_file(tmp_path):
     assert pkg["keywords"] == ["faction: Space Marines"]
 
 
+def test_stage_into_library_unpacks_nested_archive(tmp_path, monkeypatch):
+    # Patreon repack: outer .rar contains an inner .zip with the actual model.
+    archive = tmp_path / "Bundle.rar"
+    archive.write_text("rar")
+    library = tmp_path / "library"
+
+    def fake_extract(src, outdir):
+        s = str(src)
+        if s.endswith("Bundle.rar"):
+            Path(outdir, "inner.zip").write_text("zip")     # outer -> inner archive
+        elif s.endswith("inner.zip"):
+            Path(outdir, "model.stl").write_text("mesh")    # inner -> model
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive", fake_extract)
+    dest = stage_into_library(archive, library, ["faction: Orks"])
+
+    names = {p.name for p in dest.iterdir() if p.is_file()}
+    assert "datapackage.json" in names
+    assert any(n.endswith("model.stl") for n in names)               # inner model flattened in
+    assert not any(n.endswith((".zip", ".rar")) for n in names)      # no archive shells left
+
+
+def test_stage_into_library_rejects_nested_executable(tmp_path, monkeypatch):
+    archive = tmp_path / "Bad.zip"
+    archive.write_text("zip")
+    library = tmp_path / "library"
+
+    def fake_extract(src, outdir):
+        s = str(src)
+        if s.endswith("Bad.zip"):
+            Path(outdir, "inner.zip").write_text("zip")
+        elif s.endswith("inner.zip"):
+            Path(outdir, "model.stl").write_text("mesh")
+            Path(outdir, "virus.exe").write_text("x")       # executable hidden a level deep
+
+    monkeypatch.setattr("manyfold_ingest.patoolib.extract_archive", fake_extract)
+    with pytest.raises(ManyfoldError):
+        stage_into_library(archive, library, [])
+    assert not library.exists()                              # nothing staged
+
+
 def test_stage_into_library_flattens_nested_archive(tmp_path, monkeypatch):
     # Manyfold makes one model per subfolder, so a staged archive must be
     # flattened into a single flat folder => one model per zip.

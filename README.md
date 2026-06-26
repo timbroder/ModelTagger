@@ -304,6 +304,12 @@ split sets (`name.7z.001 … name.7z.NNN`, also `.zip`/`.rar`) — are treated a
 model: only the first volume is processed (the archiver pulls in the rest), and
 the volume marker is stripped from the model name.
 
+**Nested archives** — a bundle whose contents are *inner* archives (e.g. an outer
+`.rar` holding one `.zip` per sub-model, a common Patreon repack) is unpacked
+recursively (bounded depth) so the real model files are found and staged as one
+model; corrupt inner archives are skipped, and an executable found at any level
+rejects the bundle.
+
 ---
 
 ## 🧪 Tests
