@@ -18,7 +18,7 @@ import requests
 from utils import (
     slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS,
     ARCHIVE_EXTS, LOOSE_EXTS, TAGGABLE_EXTS, BAD_EXTS,
-    multipart_volume_number,
+    multipart_volume_number, extract_nested_archives,
 )
 
 # Resolve config relative to the repo root so the CLI works from any cwd
@@ -61,6 +61,7 @@ def extract_to_temp(file_path: Path) -> Path | None:
         # isn't .7z — patoolib detects the type by content and pulls the set).
         if ext in ARCHIVE_EXTS or multipart_volume_number(file_path.name) is not None:
             patoolib.extract_archive(str(file_path), outdir=str(temp_dir))
+            extract_nested_archives(temp_dir)  # unpack inner .zip/.rar bundles
         elif ext in LOOSE_EXTS:
             shutil.copy(file_path, temp_dir / file_path.name)
         else:

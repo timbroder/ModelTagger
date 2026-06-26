@@ -1,5 +1,9 @@
 import re
+import shutil
+from pathlib import Path
 from urllib.parse import urlparse, unquote
+
+import patoolib
 
 
 def slugify(title: str) -> str:
@@ -131,6 +135,49 @@ TAGGABLE_EXTS = LOOSE_EXTS | ARCHIVE_EXTS
 BAD_EXTS = frozenset({
     ".exe", ".bat", ".cmd", ".com", ".msi", ".scr", ".js", ".dll", ".sh", ".ps1",
 })
+
+
+def _is_archive_member(name: str) -> bool:
+    """True if ``name`` is an unpackable archive — a normal archive ext or any
+    volume of a multi-volume set (.partN.rar / .<ext>.NNN)."""
+    return Path(name).suffix.lower() in ARCHIVE_EXTS or multipart_volume_number(name) is not None
+
+
+def extract_nested_archives(root: Path, max_depth: int = 3) -> None:
+    """Recursively unpack archives found INSIDE ``root`` (in place).
+
+    Patreon repacks often bundle inner .zip/.rar/.7z (one per sub-model) with
+    the real model files a level deeper, so a single extract leaves only inner
+    archives and the content looks empty. This unpacks them (bounded depth),
+    removing each archive once extracted. Corrupt/incomplete inner archives are
+    skipped (siblings still get unpacked); only a multi-volume set's first
+    volume is extracted, and any leftover archive shells / continuation volumes
+    are dropped so they aren't flattened into the model.
+    """
+    for _ in range(max_depth):
+        firsts = [p for p in root.rglob("*")
+                  if p.is_file() and _is_archive_member(p.name)
+                  and (multipart_volume_number(p.name) or 1) == 1]
+        if not firsts:
+            break
+        progressed = False
+        for arc in firsts:
+            if not arc.exists():
+                continue
+            out = arc.parent / f"{arc.name}__unpacked"
+            try:
+                out.mkdir(exist_ok=True)
+                patoolib.extract_archive(str(arc), outdir=str(out))
+            except Exception:
+                shutil.rmtree(out, ignore_errors=True)
+                continue  # corrupt/incomplete inner archive — skip, keep the rest
+            arc.unlink()
+            progressed = True
+        if not progressed:
+            break
+    for p in root.rglob("*"):
+        if p.is_file() and _is_archive_member(p.name):
+            p.unlink(missing_ok=True)
 
 
 def filter_query_tokens(words: list[str]) -> list[str]:

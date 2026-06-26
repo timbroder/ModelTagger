@@ -17,8 +17,8 @@ from tqdm import tqdm
 from manyfold import ManyfoldClient, ManyfoldError, model_tags
 from utils import (
     slugify, clean_file_name, filter_query_tokens,
-    ARCHIVE_EXTS as _ARCHIVE_EXTS, LOOSE_EXTS as _LOOSE_EXTS,
-    multipart_volume_number, strip_multipart_suffix,
+    ARCHIVE_EXTS as _ARCHIVE_EXTS, LOOSE_EXTS as _LOOSE_EXTS, BAD_EXTS,
+    multipart_volume_number, strip_multipart_suffix, extract_nested_archives,
 )
 
 # Structured fields owned by this pipeline across all modes — namespaced tags
@@ -212,6 +212,9 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str],
         # isn't a recognized archive ext — patoolib detects it by content.
         if ext in _ARCHIVE_EXTS or multipart_volume_number(archive.name) is not None:
             patoolib.extract_archive(str(archive), outdir=str(staging))
+            extract_nested_archives(staging)  # unpack inner .zip/.rar bundles
+            if any(p.suffix.lower() in BAD_EXTS for p in staging.rglob("*") if p.is_file()):
+                raise ManyfoldError(f"Archive contains an executable: {archive.name}")
             _flatten_into_root(staging)
         elif ext in _LOOSE_EXTS:
             shutil.copy(archive, staging / archive.name)
