@@ -101,5 +101,42 @@
       }
     },
     "prompt": "You are tagging a Warhammer-scale tabletop TERRAIN piece (scenery, not a miniature) for a hobby library, using its file names and your own knowledge. Respond with ONLY a JSON object — no prose, no code fences — with exactly these keys: terrain_type, setting, faction_theme, function, modular, tags.\n\nRules:\n- terrain_type: one of building, ruin, fortification, wall/barricade, tower, bunker, gate/door, bridge/walkway, platform, emplacement/turret, industrial, objective, scatter, monument, unknown. (industrial = pipes/containers/generators/conduits.)\n- setting: one of sci-fi/industrial, gothic-imperial, xenos, urban-ruins, fantasy/medieval, modern, wasteland, unknown. (gothic-imperial = Sanctum Imperialis / cathedral style; urban-ruins = Zone Mortalis / Necromunda; xenos = Necron/Aeldari/Tau alien styling.)\n- faction_theme: if the piece is clearly themed to a Warhammer 40K faction (e.g. Sanctum->Adeptus Ministorum/Imperium, Pylon->Necrons), give that faction's canonical name; otherwise \"none\". Use \"unknown\" only if a faction is implied but you can't tell which.\n- function: gameplay role, one of los-blocker, cover/defensible, objective, decorative/scatter, gameplay (a door/spawn/interactive element), unknown.\n- modular: \"yes\" if it is part of a tile/modular system (modular pipes, conduit packs, Zone Mortalis tiles), \"no\" if a standalone piece, else \"unknown\".\n- tags: 3-8 concise descriptive tags that ADD information (materials, era, notable features). Do NOT repeat a value already in another field, and do NOT include file/print terms (supported, presupported, STL) or generic terms like \"terrain\", \"scenery\", \"Warhammer 40K\", or \"tabletop\".\n\nUse \"unknown\" for any field you cannot determine from the names — do not guess."
+  },
+  "aos": {
+    "vector_db": ".chroma/aos",
+    "seeds": "seeds/aos_seeds.txt",
+    "lore_dir": "lore/aos",
+    "tag_output": "tags-aos.csv",
+    "collection_field": "faction",
+    "retrieval": false,
+    "fields": ["faction", "subfaction", "unit", "model_type", "role", "grand_alliance", "equipment"],
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["faction", "subfaction", "unit", "model_type", "role", "grand_alliance", "equipment", "tags"],
+      "properties": {
+        "faction": {
+          "type": "string",
+          "enum": ["Stormcast Eternals", "Cities of Sigmar", "Fyreslayers", "Kharadron Overlords", "Lumineth Realm-lords", "Daughters of Khaine", "Idoneth Deepkin", "Sylvaneth", "Seraphon", "Slaves to Darkness", "Blades of Khorne", "Disciples of Tzeentch", "Maggotkin of Nurgle", "Hedonites of Slaanesh", "Skaven", "Beasts of Chaos", "Soulblight Gravelords", "Nighthaunt", "Ossiarch Bonereapers", "Flesh-eater Courts", "Orruk Warclans", "Gloomspite Gitz", "Ogor Mawtribes", "Sons of Behemat", "The Empire", "Bretonnia", "Dwarfs", "High Elves", "Wood Elves", "Dark Elves", "Tomb Kings", "Vampire Counts", "Lizardmen", "Warriors of Chaos", "Orcs and Goblins", "unknown"]
+        },
+        "subfaction": {"type": "string"},
+        "unit": {"type": "string"},
+        "model_type": {
+          "type": "string",
+          "enum": ["Infantry", "Character", "Cavalry", "Monster", "War Machine", "Chariot", "Behemoth", "Terrain", "Bust", "Diorama", "unknown"]
+        },
+        "role": {
+          "type": "string",
+          "enum": ["Leader", "Battleline", "Behemoth", "Artillery", "Other", "unknown"]
+        },
+        "grand_alliance": {
+          "type": "string",
+          "enum": ["Order", "Chaos", "Death", "Destruction", "unknown"]
+        },
+        "equipment": {"type": "array", "items": {"type": "string"}},
+        "tags": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "prompt": "You are tagging an Age of Sigmar / Warhammer Fantasy (Old World) miniature for a hobby library, using its file names and your own knowledge. Respond with ONLY a JSON object — no prose, no code fences — with exactly these keys: faction, subfaction, unit, model_type, role, grand_alliance, equipment, tags.\n\nRules:\n- faction: one of Stormcast Eternals, Cities of Sigmar, Fyreslayers, Kharadron Overlords, Lumineth Realm-lords, Daughters of Khaine, Idoneth Deepkin, Sylvaneth, Seraphon, Slaves to Darkness, Blades of Khorne, Disciples of Tzeentch, Maggotkin of Nurgle, Hedonites of Slaanesh, Skaven, Beasts of Chaos, Soulblight Gravelords, Nighthaunt, Ossiarch Bonereapers, Flesh-eater Courts, Orruk Warclans, Gloomspite Gitz, Ogor Mawtribes, Sons of Behemat, The Empire, Bretonnia, Dwarfs, High Elves, Wood Elves, Dark Elves, Tomb Kings, Vampire Counts, Lizardmen, Warriors of Chaos, Orcs and Goblins, unknown. Use the Old World army name for clearly Old World/Warhammer Fantasy sculpts (e.g. Vampire Counts, Tomb Kings, The Empire) and the Age of Sigmar name for AoS sculpts (e.g. Soulblight Gravelords, Ossiarch Bonereapers); do not canonicalize one onto the other.\n- subfaction: the more specific allegiance if evident (e.g. Hallowheart, Legion of Blood, Hammerers, Carstein), else unknown.\n- unit: the specific unit or character (e.g. Lord-Celestant, Prince Vhordrai, Stormvermin, Ironbreaker), else unknown.\n- model_type: one of Infantry, Character, Cavalry, Monster, War Machine, Chariot, Behemoth, Terrain, Bust, Diorama, unknown.\n- role: battlefield role, one of Leader, Battleline, Behemoth, Artillery, Other, unknown.\n- grand_alliance: the AoS Grand Alliance, one of Order, Chaos, Death, Destruction, unknown. (Old World maps too: Empire/Bretonnia/Dwarfs/Elves/Lizardmen -> Order; Warriors of Chaos/Skaven/Beasts -> Chaos; Vampire Counts/Tomb Kings -> Death; Orcs and Goblins/Ogres -> Destruction.)\n- equipment: notable weapons or wargear evident from the file/part names — NOT an assumed loadout you can't see, and NOT anatomy. Leave empty if none.\n- tags: 3-8 concise, lore-aligned descriptive tags that ADD information. Do NOT repeat the faction, subfaction, unit, or any value already in another field, and do NOT include file/print terms (supported, presupported, STL) or generic terms like \"Age of Sigmar\", \"Warhammer\", \"miniature\", or \"tabletop\".\n\nUse \"unknown\" for any field you cannot determine from the names — do not guess."
   }
 }
