@@ -276,8 +276,16 @@ How the sync works:
   from the CSV (`faction: Adepta Sororitas`, `unit: Sister Superior`, ...).
   The pipeline only ever replaces tags in namespaces it owns — anything you
   added by hand in the Manyfold UI survives re-runs. Models also get
-  assigned to a collection named after their faction (created on demand)
+  assigned to a collection named after the mode's `collection_field`
+  (`faction` for warhammer, `terrain_type` for terrain — created on demand)
   unless you already put them in one.
+- **`upload --reconcile-collections`** is a CSV-free repair pass: it walks
+  every model in Manyfold and assigns a collection straight from the model's
+  own `<collection_field>:` tag (e.g. `faction: Orks`), skipping anything
+  already in a collection. Use it to fix models the name-matched sync left
+  Unassigned because their staged name drifted from the CSV filename (name
+  collisions at scale). Idempotent, honors keep-manual, respects `--dry-run`
+  and `--limit`.
 - **Models not in Manyfold yet** are staged into the library folder:
   archives are unpacked into a folder per model with a `datapackage.json`
   carrying the tags (Manyfold imports it at scan time), then a library scan
