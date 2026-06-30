@@ -4,6 +4,7 @@
     "seeds": "seeds/warhammer_seeds.txt",
     "lore_dir": "lore/warhammer",
     "tag_output": "tags-warhammer.csv",
+    "collection_field": "faction",
     "fields": ["faction", "subfaction", "unit", "model_type", "role", "allegiance", "equipment"],
     "schema": {
       "type": "object",
@@ -39,6 +40,7 @@
     "seeds": "seeds/dnd_seeds.txt",
     "lore_dir": "lore/dnd",
     "tag_output": "tags-dnd.csv",
+    "collection_field": "creature_type",
     "fields": ["creature", "creature_type", "size", "class", "alignment", "equipment"],
     "schema": {
       "type": "object",
@@ -61,5 +63,43 @@
       }
     },
     "prompt": "You are tagging a Dungeons & Dragons miniature for a hobby library, using its file names and retrieved lore. Respond with ONLY a JSON object — no prose, no code fences — with exactly these keys: creature, creature_type, size, class, alignment, equipment, tags.\n\nRules:\n- creature: the specific creature or character (e.g. Beholder, Goblin Archer, Human Wizard).\n- creature_type: one of Aberration, Beast, Celestial, Construct, Dragon, Elemental, Fey, Fiend, Giant, Humanoid, Monstrosity, Ooze, Plant, Undead, unknown.\n- size: one of Tiny, Small, Medium, Large, Huge, Gargantuan, unknown.\n- class: character class if applicable (e.g. Fighter, Wizard), else unknown.\n- alignment: typical alignment if well known (e.g. Chaotic Evil), else unknown.\n- equipment: notable weapons or gear evident from the file/part names — NOT an assumed loadout you can't see, and NOT anatomy. Leave empty if none.\n- tags: 3-8 concise descriptive tags that ADD information. Do NOT repeat the creature, class, or any value already in another field, and do NOT include file/print terms (supported, custom sculpt, STL) or generic terms like \"miniature\" or \"tabletop\".\n\nUse \"unknown\" for any field you cannot determine from the names and lore — do not guess."
+  },
+  "terrain": {
+    "vector_db": ".chroma/terrain",
+    "seeds": "seeds/terrain_seeds.txt",
+    "lore_dir": "lore/terrain",
+    "tag_output": "tags-terrain.csv",
+    "collection_field": "terrain_type",
+    "retrieval": false,
+    "fields": ["terrain_type", "setting", "faction_theme", "function", "modular"],
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terrain_type", "setting", "faction_theme", "function", "modular", "tags"],
+      "properties": {
+        "terrain_type": {
+          "type": "string",
+          "enum": ["building", "ruin", "fortification", "wall/barricade", "tower", "bunker", "gate/door", "bridge/walkway", "platform", "emplacement/turret", "industrial", "objective", "scatter", "monument", "unknown"]
+        },
+        "setting": {
+          "type": "string",
+          "enum": ["sci-fi/industrial", "gothic-imperial", "xenos", "urban-ruins", "fantasy/medieval", "modern", "wasteland", "unknown"]
+        },
+        "faction_theme": {
+          "type": "string",
+          "enum": ["Space Marines", "Adepta Sororitas", "Adeptus Custodes", "Adeptus Mechanicus", "Astra Militarum", "Grey Knights", "Imperial Knights", "Imperial Agents", "Chaos Space Marines", "Chaos Daemons", "Chaos Knights", "Death Guard", "Thousand Sons", "World Eaters", "Emperor's Children", "Aeldari", "Drukhari", "Orks", "Tyranids", "Genestealer Cults", "Necrons", "T'au Empire", "Leagues of Votann", "none", "unknown"]
+        },
+        "function": {
+          "type": "string",
+          "enum": ["los-blocker", "cover/defensible", "objective", "decorative/scatter", "gameplay", "unknown"]
+        },
+        "modular": {
+          "type": "string",
+          "enum": ["yes", "no", "unknown"]
+        },
+        "tags": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "prompt": "You are tagging a Warhammer-scale tabletop TERRAIN piece (scenery, not a miniature) for a hobby library, using its file names and your own knowledge. Respond with ONLY a JSON object — no prose, no code fences — with exactly these keys: terrain_type, setting, faction_theme, function, modular, tags.\n\nRules:\n- terrain_type: one of building, ruin, fortification, wall/barricade, tower, bunker, gate/door, bridge/walkway, platform, emplacement/turret, industrial, objective, scatter, monument, unknown. (industrial = pipes/containers/generators/conduits.)\n- setting: one of sci-fi/industrial, gothic-imperial, xenos, urban-ruins, fantasy/medieval, modern, wasteland, unknown. (gothic-imperial = Sanctum Imperialis / cathedral style; urban-ruins = Zone Mortalis / Necromunda; xenos = Necron/Aeldari/Tau alien styling.)\n- faction_theme: if the piece is clearly themed to a Warhammer 40K faction (e.g. Sanctum->Adeptus Ministorum/Imperium, Pylon->Necrons), give that faction's canonical name; otherwise \"none\". Use \"unknown\" only if a faction is implied but you can't tell which.\n- function: gameplay role, one of los-blocker, cover/defensible, objective, decorative/scatter, gameplay (a door/spawn/interactive element), unknown.\n- modular: \"yes\" if it is part of a tile/modular system (modular pipes, conduit packs, Zone Mortalis tiles), \"no\" if a standalone piece, else \"unknown\".\n- tags: 3-8 concise descriptive tags that ADD information (materials, era, notable features). Do NOT repeat a value already in another field, and do NOT include file/print terms (supported, presupported, STL) or generic terms like \"terrain\", \"scenery\", \"Warhammer 40K\", or \"tabletop\".\n\nUse \"unknown\" for any field you cannot determine from the names — do not guess."
   }
 }
