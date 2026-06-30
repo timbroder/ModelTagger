@@ -24,10 +24,13 @@ from utils import (
 
 # Structured fields owned by this pipeline across all modes — namespaced tags
 # with these prefixes are replaced on re-runs; everything else (manual tags
-# added in the Manyfold UI) is preserved.
+# added in the Manyfold UI) is preserved. The union spans every preset's
+# schema (warhammer + dnd + terrain + aos), so re-runs in any mode refresh
+# only that mode's fields and leave the rest untouched.
 OWNED_NAMESPACES = [
     "faction", "subfaction", "unit", "model_type", "role", "allegiance",
     "equipment", "creature", "creature_type", "size", "class", "alignment",
+    "terrain_type", "setting", "faction_theme", "function", "modular",
 ]
 
 # Fuzzy-match floor for mapping CSV filenames onto scanned Manyfold model
@@ -247,12 +250,15 @@ def run_upload(
     limit: int | None = None,
     check: bool = False,
     delete_source: bool = False,
+    collection_field: str = "faction",
 ) -> None:
     """Sync a structured tag CSV into Manyfold.
 
     Existing models (matched by name) get namespaced tags applied with the
-    update-owned-keep-manual policy plus a faction collection. Missing models
-    are staged into the library folder (with a datapackage.json carrying
+    update-owned-keep-manual policy plus a collection. ``collection_field`` is
+    the per-mode CSV column that drives collection assignment (faction for
+    warhammer/aos, terrain_type for terrain, creature_type for dnd). Missing
+    models are staged into the library folder (with a datapackage.json carrying
     their tags) and a scan is triggered; run upload again after the scan
     completes to apply collections to the newly scanned models.
     """
@@ -338,9 +344,9 @@ def run_upload(
                 attributes: dict = {}
                 if sorted(merged) != sorted(existing):
                     attributes["keywords"] = merged
-                faction = (row.get("faction") or "").strip()
-                if faction and not detail.get("isPartOf"):
-                    coll = ensure_collection(faction)
+                coll_value = (row.get(collection_field) or "").strip()
+                if coll_value and not detail.get("isPartOf"):
+                    coll = ensure_collection(coll_value)
                     cid = (coll or {}).get("@id") or (coll or {}).get("id")
                     if cid is not None:
                         attributes["isPartOf"] = {"@id": cid, "@type": "Collection"}

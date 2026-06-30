@@ -456,6 +456,10 @@ def run_tagging(
 
     vector_db_path = vector_db_path or presets["vector_db"]
     prompt = prompt_override or presets["prompt"]
+    # Some modes (e.g. terrain) have no relevant lore corpus — the unit-lore
+    # RAG just adds noise. They set "retrieval": false in the preset, and we tag
+    # from file names + model knowledge alone, never touching a vector DB.
+    retrieval_enabled = presets.get("retrieval", True)
 
     # The schema is the source of truth for the output fields when present.
     if presets.get("schema"):
@@ -481,11 +485,13 @@ def run_tagging(
         tag_list = tags if tags is not None else parsed.get("tags", [])
         return [filename] + [parsed.get(f, "") for f in fields] + [", ".join(tag_list), tagged_at]
 
-    chroma_client = PersistentClient(path=vector_db_path)
-    collection = chroma_client.get_or_create_collection(name="lore")
+    collection = None
+    if retrieval_enabled:
+        chroma_client = PersistentClient(path=vector_db_path)
+        collection = chroma_client.get_or_create_collection(name="lore")
 
     cross_encoder = None
-    if rerank:
+    if rerank and retrieval_enabled:
         from sentence_transformers import CrossEncoder
         cross_encoder = CrossEncoder(rerank_model)
 
@@ -606,80 +612,91 @@ def run_tagging(
                 query_text = " ".join(filter_query_tokens(joined_names.split())) \
                     or normalized_base_name or path.stem
 
-                # Retrieve candidate chunks: prefer chunks from pages whose
-                # slug matches any n-gram of the file name (a strong on-topic
-                # signal), falling back to an unfiltered semantic query.
-                slugs = candidate_slugs(base_words)
-                results = None
-                slug_filtered = False
-                if slugs:
-                    results = collection.query(
-                        query_texts=[query_text],
-                        n_results=20,
-                        where={"slug": {"$in": slugs}},
-                    )
-                    if results["documents"][0]:
-                        slug_filtered = True
+                if retrieval_enabled:
+                    # Retrieve candidate chunks: prefer chunks from pages whose
+                    # slug matches any n-gram of the file name (a strong on-topic
+                    # signal), falling back to an unfiltered semantic query.
+                    slugs = candidate_slugs(base_words)
+                    results = None
+                    slug_filtered = False
+                    if slugs:
+                        results = collection.query(
+                            query_texts=[query_text],
+                            n_results=20,
+                            where={"slug": {"$in": slugs}},
+                        )
+                        if results["documents"][0]:
+                            slug_filtered = True
+                        else:
+                            results = None
+                    if results is None:
+                        results = collection.query(query_texts=[query_text], n_results=20)
+
+                    documents = results["documents"][0]
+                    distances = results["distances"][0]
+                    metadatas = (results.get("metadatas") or [[]])[0]
+                    if len(metadatas) != len(documents):
+                        metadatas = [None] * len(documents)
+
+                    if not documents:
+                        tqdm.write(f"Skipping {rel_name} — no lore found in vector DB (will retry on re-run)")
+                        logging.warning(f"No lore retrieved for {rel_name} (not written; retry on re-run)")
+                        continue
+
+                    if rerank:
+                        scores = cross_encoder.predict([(query_text, d) for d in documents])
+                        ranked = sorted(zip(documents, metadatas, scores), key=lambda x: x[2], reverse=True)
+                        confident_docs = [(d, m) for d, m, _ in ranked[:8]]
                     else:
-                        results = None
-                if results is None:
-                    results = collection.query(query_texts=[query_text], n_results=20)
+                        confident_docs = select_context_docs(documents, distances, metadatas)
 
-                documents = results["documents"][0]
-                distances = results["distances"][0]
-                metadatas = (results.get("metadatas") or [[]])[0]
-                if len(metadatas) != len(documents):
-                    metadatas = [None] * len(documents)
+                    # Only warn about weak context on the unfiltered path — a slug
+                    # match means the page is on-topic by name, so trust its lore
+                    # even when the embedding distance is high.
+                    context_note = (
+                        _WEAK_CONTEXT_NOTE
+                        if not slug_filtered and distances[0] > _WEAK_CONTEXT_DISTANCE
+                        else ""
+                    )
+                    # Record why retrieval went the way it did so sparse output
+                    # (e.g. a blank faction) is diagnosable from tagging.log rather
+                    # than inferred: best-match distance, slug-filtered vs unfiltered
+                    # fallback, and whether the weak-context note fired.
+                    retrieval_diag = (
+                        f"dist={distances[0]:.3f} slug_filtered={slug_filtered} "
+                        f"weak_context={bool(context_note)}"
+                    )
+                    related = related_pages_block([m for _, m in confident_docs])
 
-                if not documents:
-                    tqdm.write(f"Skipping {rel_name} — no lore found in vector DB (will retry on re-run)")
-                    logging.warning(f"No lore retrieved for {rel_name} (not written; retry on re-run)")
-                    continue
+                    # cl100k token counts are approximate for non-OpenAI models, but
+                    # this is only the context-budget gate, not billing — close enough.
+                    prompt_tokens = count_tokens(prompt + context_note + related)
+                    context_budget = token_budget - prompt_tokens - 300
+                    current = 0
+                    context_chunks = []
+                    for doc, _ in confident_docs:
+                        t = count_tokens(doc)
+                        if current + t > context_budget:
+                            break
+                        context_chunks.append(doc)
+                        current += t
 
-                if rerank:
-                    scores = cross_encoder.predict([(query_text, d) for d in documents])
-                    ranked = sorted(zip(documents, metadatas, scores), key=lambda x: x[2], reverse=True)
-                    confident_docs = [(d, m) for d, m, _ in ranked[:8]]
+                    context = "\n".join(context_chunks)
                 else:
-                    confident_docs = select_context_docs(documents, distances, metadatas)
+                    # Retrieval disabled (e.g. terrain): tag from file names +
+                    # model knowledge alone, no lore context.
+                    context = context_note = related = ""
+                    prompt_tokens = count_tokens(prompt)
+                    retrieval_diag = "retrieval=disabled"
 
-                # Only warn about weak context on the unfiltered path — a slug
-                # match means the page is on-topic by name, so trust its lore
-                # even when the embedding distance is high.
-                context_note = (
-                    _WEAK_CONTEXT_NOTE
-                    if not slug_filtered and distances[0] > _WEAK_CONTEXT_DISTANCE
-                    else ""
+                lore_section = (
+                    f"Lore context follows until the end of this message:\n{context}\n\n"
+                    if context else ""
                 )
-                # Record why retrieval went the way it did so sparse output
-                # (e.g. a blank faction) is diagnosable from tagging.log rather
-                # than inferred: best-match distance, slug-filtered vs unfiltered
-                # fallback, and whether the weak-context note fired.
-                retrieval_diag = (
-                    f"dist={distances[0]:.3f} slug_filtered={slug_filtered} "
-                    f"weak_context={bool(context_note)}"
-                )
-                related = related_pages_block([m for _, m in confident_docs])
-
-                # cl100k token counts are approximate for non-OpenAI models, but
-                # this is only the context-budget gate, not billing — close enough.
-                prompt_tokens = count_tokens(prompt + context_note + related)
-                context_budget = token_budget - prompt_tokens - 300
-                current = 0
-                context_chunks = []
-                for doc, _ in confident_docs:
-                    t = count_tokens(doc)
-                    if current + t > context_budget:
-                        break
-                    context_chunks.append(doc)
-                    current += t
-
-                context = "\n".join(context_chunks)
                 full_prompt = (
                     f"{prompt}\n\nThe primary subject in question is \"{normalized_base_name}\".\n\n"
                     f"Secondary subjects could include \"{joined_names}\"\n\n"
-                    f"{context_note}{related}"
-                    f"Lore context follows until the end of this message:\n{context}\n\n"
+                    f"{context_note}{related}{lore_section}"
                 )
 
                 def fallback():

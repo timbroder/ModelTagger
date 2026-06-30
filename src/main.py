@@ -193,6 +193,7 @@ def main():
             limit=args.limit,
             check=args.check,
             delete_source=args.delete_source,
+            collection_field=preset.get('collection_field', 'faction'),
         )
     elif args.step == 'all' and args.upload:
         print("=== Upload ===")
@@ -203,6 +204,7 @@ def main():
             dry_run=args.dry_run,
             limit=args.limit,
             delete_source=args.delete_source,
+            collection_field=preset.get('collection_field', 'faction'),
         )
 
 
