@@ -57,11 +57,19 @@ always take precedence over the file, and `.env` is gitignored.
 
 ## ⚙️ Usage
 
-Every command takes `--mode warhammer|dnd` (default `warhammer`), which
-supplies the default seeds file, lore directory, vector DB path, tag CSV, and
-prompt from `config/tagging_presets.json`. Any of those can be overridden
-with flags. Run `python src/main.py <command> --help` to see each command's
-options.
+Every command takes `--mode warhammer|dnd|terrain` (default `warhammer`),
+which supplies the default seeds file, lore directory, vector DB path, tag
+CSV, prompt, and the `collection_field` that drives Manyfold collection
+grouping (`faction` for warhammer, `terrain_type` for terrain) from
+`config/tagging_presets.json`. Any of those can be overridden with flags. Run
+`python src/main.py <command> --help` to see each command's options.
+
+`terrain` is for scenery rather than minis: it uses a terrain taxonomy
+(`terrain_type`, `setting`, `faction_theme`, `function`, `modular`) and runs
+with retrieval disabled (`"retrieval": false`) — there's no relevant unit
+lore, so it tags from file names and model knowledge alone and never opens a
+vector DB. `embed`/`scrape` aren't needed for terrain; just `tag` then
+`upload`.
 
 Run the whole pipeline in one go:
 
