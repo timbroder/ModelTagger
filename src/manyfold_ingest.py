@@ -242,6 +242,95 @@ def _collection_name(c: dict) -> str:
     return (c.get("name") or c.get("title") or "").strip()
 
 
+def _tag_value(tags: list[str], field: str) -> str:
+    """First value of a namespaced tag for ``field`` (e.g. 'faction: Orks' ->
+    'Orks'), matched case-insensitively. Returns '' if no such tag.
+
+    The colon-with-trailing match avoids a sibling namespace collision
+    (``faction`` must not pick up ``faction_theme: ...``)."""
+    prefix = f"{field.lower()}:"
+    for t in tags:
+        low = t.lower()
+        if low.startswith(prefix) and not low[len(prefix):].startswith("_"):
+            return t.split(":", 1)[1].strip()
+    return ""
+
+
+def reconcile_model_collections(
+    client: ManyfoldClient,
+    collection_field: str = "faction",
+    dry_run: bool = False,
+    limit: int | None = None,
+) -> dict:
+    """Assign each model to a collection derived from its OWN namespaced tag.
+
+    Every staged model already carries its grouping value as a namespaced tag
+    (``faction: X`` for warhammer, ``terrain_type: X`` for terrain), written
+    into datapackage.json at stage time. This pass reads that tag straight off
+    the model — no CSV, no name matching — so it repairs models the CSV-driven
+    sync left Unassigned because their name drifted (normalize_name collisions,
+    or a staged name that no longer matches the CSV filename), and is robust to
+    future drift.
+
+    For each model with a ``<collection_field>:`` tag AND no ``isPartOf``, the
+    collection is ensured and ``isPartOf`` set. Idempotent and honors
+    keep-manual: a model already in a collection is left untouched.
+    """
+    models = client.list_models()
+    collections = {_collection_name(c).lower(): c for c in client.list_collections()}
+    print(f"Reconciling collections by '{collection_field}' across {len(models)} models...")
+
+    def ensure_collection(name: str) -> dict | None:
+        key = name.lower()
+        if key in collections:
+            return collections[key]
+        if dry_run:
+            collections[key] = {"name": name, "_planned": True}
+            return collections[key]
+        created = client.create_collection(name)
+        collections[key] = created
+        return created
+
+    stats = {"assigned": 0, "already_assigned": 0, "no_tag": 0, "errors": 0}
+    actions = 0
+    for model in tqdm(models, desc="Reconciling"):
+        if limit is not None and actions >= limit:
+            break
+        try:
+            # The list item omits keywords + isPartOf; the detail view has both.
+            detail = client.get_model(model)
+            if detail.get("isPartOf"):
+                stats["already_assigned"] += 1
+                continue
+            value = _tag_value(model_tags(detail), collection_field)
+            if not value:
+                stats["no_tag"] += 1
+                continue
+            coll = ensure_collection(value)
+            cid = (coll or {}).get("@id") or (coll or {}).get("id")
+            if cid is None:
+                stats["errors"] += 1
+                continue
+            actions += 1
+            name = _collection_name(detail) or detail.get("name") or detail.get("title") or "?"
+            if dry_run:
+                print(f"[DRY RUN] would assign '{name}' -> collection '{value}'")
+            else:
+                client.update_model(model, {"isPartOf": {"@id": cid, "@type": "Collection"}})
+            stats["assigned"] += 1
+        except Exception as e:
+            print(f"Error reconciling a model: {e}")
+            stats["errors"] += 1
+
+    print(
+        f"Reconcile done: {stats['assigned']} assigned, "
+        f"{stats['already_assigned']} already in a collection, "
+        f"{stats['no_tag']} without a {collection_field} tag, "
+        f"{stats['errors']} errors" + (" [dry run]" if dry_run else "")
+    )
+    return stats
+
+
 def run_upload(
     csv_path: str,
     zips_dir: str | None = None,
@@ -251,6 +340,7 @@ def run_upload(
     check: bool = False,
     delete_source: bool = False,
     collection_field: str = "faction",
+    reconcile_collections: bool = False,
 ) -> None:
     """Sync a structured tag CSV into Manyfold.
 
@@ -279,6 +369,12 @@ def run_upload(
         print("Manyfold API capabilities:")
         for k, v in caps.items():
             print(f"  {k}: {v if v is not None else 'unknown (no OpenAPI spec found)'}")
+        return
+
+    if reconcile_collections:
+        # CSV-free repair pass: assign collections from each model's own
+        # namespaced tag (see reconcile_model_collections).
+        reconcile_model_collections(client, collection_field, dry_run=dry_run, limit=limit)
         return
 
     library = Path(library_path or os.getenv("MANYFOLD_LIBRARY_PATH") or "") if (

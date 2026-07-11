@@ -124,6 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--csv', help='Path to tag CSV (default: preset tag_output)')
     p.add_argument('--zips', help='Folder containing the model archives to stage')
     p.add_argument('--check', action='store_true', help='Probe the Manyfold API capabilities and exit')
+    p.add_argument('--reconcile-collections', action='store_true',
+                   help="Skip the CSV sync; instead assign every model a collection from its own "
+                        "namespaced tag (the preset's collection_field, e.g. faction/terrain_type). "
+                        'Repairs models left Unassigned by name-match drift. Idempotent.')
 
     p = sub.add_parser('all', help='Run scrape → embed → tag in one go')
     _add_mode(p)
@@ -194,6 +198,7 @@ def main():
             check=args.check,
             delete_source=args.delete_source,
             collection_field=preset.get('collection_field', 'faction'),
+            reconcile_collections=args.reconcile_collections,
         )
     elif args.step == 'all' and args.upload:
         print("=== Upload ===")
