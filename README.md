@@ -304,6 +304,12 @@ How the sync works:
   Unassigned because their staged name drifted from the CSV filename (name
   collisions at scale). Idempotent, honors keep-manual, respects `--dry-run`
   and `--limit`.
+- **`prune --names <file>`** bulk-deletes models by an exact-name list (one
+  name per line) — for clearing junk/stray models (orphan render images, loose
+  bits). Matching is exact and case-insensitive; a name that matches no model
+  or more than one is reported and skipped (never guessed), and short/generic
+  names are held back unless `--allow-generic`. Always dry-run first:
+  `python src/main.py prune --names found_fragments.txt --dry-run`.
 - **Models not in Manyfold yet** are staged into the library folder:
   archives are unpacked into a folder per model with a `datapackage.json`
   carrying the tags (Manyfold imports it at scan time), then a library scan

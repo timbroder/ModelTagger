@@ -235,6 +235,14 @@ class ManyfoldClient:
             raise ManyfoldError(f"POST /collections -> HTTP {resp.status_code}: {resp.text[:200]}")
         return resp.json()
 
+    def delete_model(self, model: dict) -> None:
+        """Delete a model. Used by the prune cleanup to remove junk/stray
+        models (orphan renders, loose bits) by an exact-name list."""
+        path = self._resource_path(model, "models")
+        resp = self._request("DELETE", path)
+        if not resp.ok:
+            raise ManyfoldError(f"DELETE {path} -> HTTP {resp.status_code}: {resp.text[:200]}")
+
     def trigger_scan(self) -> bool:
         """Ask the instance to rescan its libraries. Returns False if no scan
         endpoint is available (older API) — scan manually in the UI then."""

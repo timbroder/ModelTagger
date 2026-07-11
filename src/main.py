@@ -5,7 +5,7 @@ from pathlib import Path
 from tagging import run_tagging
 from scrape import run_scraping
 from embed import run_embedding
-from manyfold_ingest import run_upload
+from manyfold_ingest import run_upload, run_prune
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "tagging_presets.json"
 # Repo root holds the project's .env (ANTHROPIC_API_KEY, OPENAI_API_KEY, MANYFOLD_*)
@@ -133,6 +133,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "namespaced tag (the preset's collection_field, e.g. faction/terrain_type). "
                         'Repairs models left Unassigned by name-match drift. Idempotent.')
 
+    p = sub.add_parser('prune', help='Delete Manyfold models by an exact-name list (junk/stray cleanup)')
+    p.add_argument('--names', required=True, help='File of model names to delete, one per line')
+    p.add_argument('--dry-run', action='store_true', help='Print what would be deleted without deleting')
+    p.add_argument('--limit', type=int, help='Stop after deleting this many models')
+    p.add_argument('--allow-generic', action='store_true',
+                   help='Also delete short/generic names (held back by default)')
+
     p = sub.add_parser('all', help='Run scrape → embed → tag in one go')
     _add_mode(p)
     _add_lore_dir(p)
@@ -150,6 +157,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     load_env()
     args = build_parser().parse_args()
+
+    # prune operates purely on Manyfold state and has no --mode/preset.
+    if args.step == 'prune':
+        run_prune(args.names, dry_run=args.dry_run, limit=args.limit,
+                  allow_generic=args.allow_generic)
+        return
+
     preset = load_preset(args.mode)
 
     if args.step in ('scrape', 'all'):
