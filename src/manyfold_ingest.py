@@ -249,6 +249,22 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str],
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _make_client() -> ManyfoldClient | None:
+    """Build a ManyfoldClient from the MANYFOLD_* env vars, or print an error
+    and return None if the API URL isn't set."""
+    api_url = os.getenv("MANYFOLD_API_URL")
+    if not api_url:
+        print("Error: MANYFOLD_API_URL environment variable required.")
+        return None
+    return ManyfoldClient(
+        api_url,
+        token=os.getenv("MANYFOLD_API_TOKEN"),
+        client_id=os.getenv("MANYFOLD_CLIENT_ID"),
+        client_secret=os.getenv("MANYFOLD_CLIENT_SECRET"),
+        scopes=os.getenv("MANYFOLD_SCOPES", "public read write"),
+    )
+
+
 def _collection_name(c: dict) -> str:
     return (c.get("name") or c.get("title") or "").strip()
 
@@ -363,17 +379,9 @@ def run_upload(
     their tags) and a scan is triggered; run upload again after the scan
     completes to apply collections to the newly scanned models.
     """
-    api_url = os.getenv("MANYFOLD_API_URL")
-    if not api_url:
-        print("Error: MANYFOLD_API_URL environment variable required.")
+    client = _make_client()
+    if client is None:
         return
-    client = ManyfoldClient(
-        api_url,
-        token=os.getenv("MANYFOLD_API_TOKEN"),
-        client_id=os.getenv("MANYFOLD_CLIENT_ID"),
-        client_secret=os.getenv("MANYFOLD_CLIENT_SECRET"),
-        scopes=os.getenv("MANYFOLD_SCOPES", "public read write"),
-    )
 
     if check:
         caps = client.capabilities()
@@ -514,3 +522,84 @@ def run_upload(
         f"{stats['staged']} staged for scan{deleted}, {stats['missing_source']} missing source, "
         f"{stats['errors']} errors" + (" [dry run]" if dry_run else "")
     )
+
+
+# Names too generic to auto-delete by exact match (they could hit a real
+# model). Held back unless --allow-generic.
+_PRUNE_MIN_LEN = 4
+_PRUNE_GENERIC = {
+    "base", "bases", "body", "bodies", "head", "heads", "arm", "arms", "leg",
+    "legs", "hand", "hands", "bit", "bits", "axe", "part", "parts", "wing", "wings",
+}
+
+
+def run_prune(
+    names_path: str,
+    dry_run: bool = False,
+    limit: int | None = None,
+    allow_generic: bool = False,
+) -> dict:
+    """Delete Manyfold models whose name matches a line in ``names_path``.
+
+    Built for junk/stray-model cleanup (orphan render images, loose bits) using
+    a list like found_fragments.txt. Matching is EXACT and case-insensitive on
+    the model's name/title — safe by construction. A name matching no model, or
+    more than one, is reported and skipped (never guessed). Short/generic names
+    (len < 4 or in a denylist) are held back unless ``allow_generic``. ``dry_run``
+    prints the plan without deleting; ``limit`` caps the number deleted.
+    """
+    client = _make_client()
+    if client is None:
+        return {}
+
+    targets: list[str] = []
+    seen: set[str] = set()
+    for line in open(names_path, encoding="utf-8"):
+        name = line.strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            targets.append(name)
+
+    print(f"Loaded {len(targets)} target names from {names_path}; fetching Manyfold models...")
+    models = client.list_models()
+    by_name: dict[str, list[dict]] = {}
+    for m in models:
+        for key in (m.get("name"), m.get("title")):
+            if key:
+                by_name.setdefault(key.strip().lower(), []).append(m)
+    print(f"Manyfold has {len(models)} models")
+
+    stats = {"deleted": 0, "not_found": 0, "ambiguous": 0, "held_generic": 0, "errors": 0}
+    for name in targets:
+        if limit is not None and stats["deleted"] >= limit:
+            break
+        key = name.lower()
+        matches = by_name.get(key, [])
+        if not matches:
+            stats["not_found"] += 1
+            continue
+        if len(matches) > 1:
+            print(f"[ambiguous] {name!r} matches {len(matches)} models — skipped (delete by hand)")
+            stats["ambiguous"] += 1
+            continue
+        if not allow_generic and (len(name) < _PRUNE_MIN_LEN or key in _PRUNE_GENERIC):
+            print(f"[held] {name!r} is generic — skipped (use --allow-generic to include)")
+            stats["held_generic"] += 1
+            continue
+        try:
+            if dry_run:
+                print(f"[DRY RUN] would delete {name!r}")
+            else:
+                client.delete_model(matches[0])
+            stats["deleted"] += 1
+        except Exception as e:
+            print(f"Error deleting {name!r}: {e}")
+            stats["errors"] += 1
+
+    verb = "would delete" if dry_run else "deleted"
+    print(
+        f"Done: {verb} {stats['deleted']}, {stats['not_found']} not found, "
+        f"{stats['ambiguous']} ambiguous, {stats['held_generic']} held (generic), "
+        f"{stats['errors']} errors" + (" [dry run]" if dry_run else "")
+    )
+    return stats
