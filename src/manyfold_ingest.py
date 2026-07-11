@@ -218,6 +218,12 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str],
         # sees one model (each subfolder would otherwise be its own model).
         if archive.is_dir():
             shutil.copytree(archive, staging)
+            # A folder unit models its LOOSE files; any archives sitting among
+            # them are separate models (staged on their own), so drop them from
+            # the copy rather than merging them in (ModelTagger2-89r).
+            for p in [f for f in staging.rglob("*") if f.is_file()]:
+                if p.suffix.lower() in _ARCHIVE_EXTS or multipart_volume_number(p.name) is not None:
+                    p.unlink()
             if any(p.suffix.lower() in BAD_EXTS for p in staging.rglob("*") if p.is_file()):
                 raise ManyfoldError(f"Folder contains an executable: {archive.name}")
             _flatten_into_root(staging)

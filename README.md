@@ -195,8 +195,11 @@ model, fold subfolders in); a variant/wrapper folder (`OBJ`/`STL`/`Supported`)
 or a single child collapses; a mostly part-named folder (`body`/`wings`/…) is
 one kitbash; otherwise it splits into its real children and recurses. A folder
 that would split into more than 8 models is flagged for a human glance.
-Archives are unaffected (still one model each). Validated on the sample
-`files/` tree (58 loose files → 31 real sculpts).
+Archives are unaffected (still one model each) — and an **archive-dominated**
+folder (an archive *collection* with a few stray loose files) is skipped from
+grouping entirely, so its archives stay one-model-each rather than being merged
+into one blob. Validated on the sample `files/` tree (58 loose files → 31 real
+sculpts).
 
 For each archive/file: extracts it, validates the contents (must contain a
 3D model or image; archives with executables are skipped), cleans the

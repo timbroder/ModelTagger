@@ -137,6 +137,61 @@ def test_max_split_emits_warning_but_still_produces_units(tmp_path):
     assert "review before upload" in warnings[0]
 
 
+# --- archive-dominated folders are not merged (ModelTagger2-89r) -----------
+
+def _mk_files(root, *rels):
+    for rel in rels:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+
+
+def test_archive_collection_folder_is_skipped_not_merged(tmp_path):
+    # A folder of many archives with a few stray loose files must NOT collapse
+    # into one merged model — the archives are separate models.
+    zips = tmp_path / "zips"
+    archives = [f"KUH/kit{i}.zip" for i in range(10)]
+    _mk_files(zips, *archives, "KUH/warhound face.stl", "KUH/banner.stl")
+    units, warnings = resolve_model_units(zips)
+    assert units == []                                   # nothing merged
+    assert len(warnings) == 1
+    assert "archive-dominated" in warnings[0]
+    assert "KUH" in warnings[0]
+
+
+def test_pure_loose_kit_still_groups(tmp_path):
+    # No archives -> unaffected by the guard.
+    zips = tmp_path / "zips"
+    _mk_files(zips, "Barbgants/sculpt/model.stl")
+    paths, warnings = _units(zips)
+    assert paths == ["Barbgants"]
+    assert warnings == []
+
+
+def test_loose_kit_with_one_stray_archive_still_groups(tmp_path):
+    # Loose files dominate (5 loose vs 1 archive) -> still grouped as a kit.
+    zips = tmp_path / "zips"
+    _mk_files(zips, "Kit/a.stl", "Kit/b.stl", "Kit/c.stl", "Kit/d.stl",
+              "Kit/e.stl", "Kit/bonus.zip")
+    paths, warnings = _units(zips)
+    assert paths == ["Kit"]
+    assert warnings == []
+
+
+def test_stage_folder_unit_excludes_stray_archive(tmp_path):
+    # The staged model must contain the loose files but NOT the stray archive
+    # (that's staged separately).
+    sys.path.append('src')
+    from manyfold_ingest import stage_into_library
+    folder = tmp_path / "Kit"
+    _mk_files(folder, "a.stl", "b.stl", "bonus.zip")
+    library = tmp_path / "library"
+    dest = stage_into_library(folder, library, ["faction: Orks"])
+    assert (dest / "a.stl").exists()
+    assert (dest / "b.stl").exists()
+    assert not (dest / "bonus.zip").exists()   # archive dropped from the unit
+
+
 # --- tagging discovery integration ----------------------------------------
 
 def _fake_response(record, in_tokens=100, out_tokens=40):
