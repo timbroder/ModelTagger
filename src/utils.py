@@ -142,12 +142,19 @@ ARCHIVE_EXTS = frozenset({".zip", ".rar", ".7z", ".gz", ".gzip", ".bz2"})
 # Anything that makes a file/archive a printable model.
 MODEL_EXTS = MESH_EXTS | SLICER_EXTS
 
-# Loose files worth discovering, tagging, and staging on their own (a model or
-# its render). Documents/video/PCB files aren't standalone models, but ride
-# along inside archives when present.
+# Loose files that ride along with a model (meshes plus their render images).
+# Images are NOT standalone models — they only accompany a real model inside an
+# archive/folder. Documents/video/PCB files likewise ride along but are never a
+# model on their own.
 LOOSE_EXTS = MODEL_EXTS | IMAGE_EXTS
 
-# Loose files plus archives — everything the tag step walks --zips for.
+# Files that can be a model ON THEIR OWN when found loose under --zips: a mesh/
+# slicer file, or an archive to unpack. A lone image is a render, not a model,
+# so it is deliberately excluded — otherwise every stray .jpg/.png becomes its
+# own Manyfold model (see ModelTagger2-2pu).
+DISCOVERABLE_EXTS = MODEL_EXTS | ARCHIVE_EXTS
+
+# Loose files plus archives — the widest set (used where images-inside count).
 TAGGABLE_EXTS = LOOSE_EXTS | ARCHIVE_EXTS
 
 # Executables never belong in a model archive — reject archives containing them.

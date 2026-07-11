@@ -17,7 +17,7 @@ from tqdm import tqdm
 from manyfold import ManyfoldClient, ManyfoldError, model_tags
 from utils import (
     slugify, clean_file_name, filter_query_tokens,
-    ARCHIVE_EXTS as _ARCHIVE_EXTS, LOOSE_EXTS as _LOOSE_EXTS, BAD_EXTS,
+    ARCHIVE_EXTS as _ARCHIVE_EXTS, MODEL_EXTS, BAD_EXTS,
     multipart_volume_number, strip_multipart_suffix, extract_nested_archives,
     multipart_volume_siblings,
 )
@@ -39,7 +39,7 @@ OWNED_NAMESPACES = [
 # worse than leaving one untagged.
 _MATCH_RATIO = 0.92
 
-# _ARCHIVE_EXTS / _LOOSE_EXTS are imported from utils (Manyfold's supported set).
+# _ARCHIVE_EXTS / MODEL_EXTS are imported from utils (Manyfold's supported set).
 
 
 def build_tags(row: dict) -> list[str]:
@@ -231,9 +231,11 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str],
                 if any(p.suffix.lower() in BAD_EXTS for p in staging.rglob("*") if p.is_file()):
                     raise ManyfoldError(f"Archive contains an executable: {archive.name}")
                 _flatten_into_root(staging)
-            elif ext in _LOOSE_EXTS:
+            elif ext in MODEL_EXTS:
                 shutil.copy(archive, staging / archive.name)
             else:
+                # A lone image (or other non-model loose file) isn't a model on
+                # its own — only ever rides along inside an archive/folder.
                 raise ManyfoldError(f"Unsupported file type: {archive.name}")
 
         with open(staging / "datapackage.json", "w", encoding="utf-8") as f:
