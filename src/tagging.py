@@ -21,6 +21,7 @@ from utils import (
     ARCHIVE_EXTS, LOOSE_EXTS, TAGGABLE_EXTS, BAD_EXTS,
     multipart_volume_number, extract_nested_archives,
 )
+from loose_folders import resolve_model_units
 
 # Resolve config relative to the repo root so the CLI works from any cwd
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -442,11 +443,17 @@ def run_tagging(
     rerank: bool = False,
     rerank_model: str = "BAAI/bge-reranker-base",
     provider: str = "anthropic",
+    loose_as_folders: bool = False,
 ) -> None:
     """Tag 3D model files using RAG with lore from the vector database.
 
     provider: "anthropic" (schema-enforced structured output), "openai", or
     "local" (Ollama). use_local=True forces "local" for backward compatibility.
+
+    loose_as_folders: resolve loose-file folder trees into model units (one
+    model per kit) via the descend/split boundary rule instead of tagging every
+    loose file individually. Archives are still one model each. See
+    ModelTagger2-17z / loose_folders.resolve_model_units.
     """
     if use_local:
         provider = "local"
@@ -539,55 +546,88 @@ def run_tagging(
     # process only the first volume (the archiver pulls the rest from its
     # siblings) and skip continuations. The first volume of a split set (e.g.
     # .7z.001) has a non-archive ext, so it's accepted here, not via TAGGABLE_EXTS.
-    discovered = []
-    for path in Path(zips_dir).rglob("*"):
-        if not path.is_file():
-            continue
+    #
+    # A work item is (rel_name, source_path, is_folder): a folder item is a
+    # resolved loose-file model unit (tagged from its subtree, no extraction); a
+    # file item is an archive or loose file (extracted/copied as before).
+    def _is_archive_file(path: Path) -> bool:
         vol = multipart_volume_number(path.name)
         if vol is not None:
-            if vol != 1:
+            return vol == 1  # first volume only
+        return path.suffix.lower() in ARCHIVE_EXTS
+
+    discovered: list[tuple[str, Path, bool]] = []
+    if loose_as_folders:
+        # Loose model files are grouped into folder units; archives stay one
+        # model each (discovered separately so a kit's loose files don't explode).
+        units, warnings = resolve_model_units(zips_dir)
+        for w in warnings:
+            tqdm.write(f"[loose-as-folders] {w}")
+            logging.warning(f"[loose-as-folders] {w}")
+        for u in units:
+            src = Path(zips_dir) / u.rel_path
+            discovered.append((u.rel_path, src, src.is_dir()))
+        for path in Path(zips_dir).rglob("*"):
+            if path.is_file() and _is_archive_file(path):
+                discovered.append((path.relative_to(zips_dir).as_posix(), path, False))
+    else:
+        for path in Path(zips_dir).rglob("*"):
+            if not path.is_file():
                 continue
-        elif path.suffix.lower() not in TAGGABLE_EXTS:
-            continue
-        discovered.append(path)
+            vol = multipart_volume_number(path.name)
+            if vol is not None:
+                if vol != 1:
+                    continue
+            elif path.suffix.lower() not in TAGGABLE_EXTS:
+                continue
+            discovered.append((path.relative_to(zips_dir).as_posix(), path, False))
 
     with open(output_csv, 'a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(header)
 
-        for path in tqdm(discovered, desc="Tagging", unit="file"):
-            # Store the path RELATIVE to --zips as the CSV filename: this makes
-            # discovery recursive (nested incoming libraries get tagged) and
-            # collision-free (same-basename archives in different subfolders no
-            # longer overwrite each other's row). upload re-joins it onto --zips
-            # to find the source; match_model/_model_dir_name use the final
-            # component, so naming and matching are unaffected.
-            rel_name = path.relative_to(zips_dir).as_posix()
+        for rel_name, source_path, is_folder in tqdm(discovered, desc="Tagging", unit="file"):
+            # rel_name (the path RELATIVE to --zips) is the CSV filename: this
+            # makes discovery recursive (nested incoming libraries get tagged)
+            # and collision-free (same-basename archives in different subfolders
+            # no longer overwrite each other's row). upload re-joins it onto
+            # --zips to find the source; match_model/_model_dir_name use the
+            # final component, so naming and matching are unaffected.
             if rel_name in processed:
                 continue
 
             temp_dir = None
             try:
-                temp_dir = extract_to_temp(path)
-                # Distinguish a hard extraction failure (corrupt/incomplete
-                # archive) from extracted-but-no-model-content, so the log gives
-                # a clean corrupt-vs-empty split. Neither writes a row, so both
-                # are retried on a re-run.
-                if temp_dir is None:
-                    tqdm.write(f"Skipping {rel_name} — could not extract (corrupt or incomplete archive)")
-                    logging.warning(f"Extraction failed for {rel_name} (corrupt/incomplete; retry on re-run)")
-                    continue
-                if not is_valid_archive_content(temp_dir):
-                    tqdm.write(f"Skipping {rel_name} — no model content (unsupported or nested archive)")
-                    logging.warning(f"No model content for {rel_name} (not written; retry on re-run)")
-                    continue
+                if is_folder:
+                    # A resolved loose-file folder unit: its model files already
+                    # sit on disk, so read names straight from the subtree (no
+                    # extraction). resolve_model_units guarantees it's
+                    # model-bearing. The model name is the folder's final
+                    # component (== the chain top), like a file's stem.
+                    content_dir = source_path
+                    base_name = clean_file_name(source_path.stem)
+                else:
+                    temp_dir = extract_to_temp(source_path)
+                    # Distinguish a hard extraction failure (corrupt/incomplete
+                    # archive) from extracted-but-no-model-content, so the log
+                    # gives a clean corrupt-vs-empty split. Neither writes a row,
+                    # so both are retried on a re-run.
+                    if temp_dir is None:
+                        tqdm.write(f"Skipping {rel_name} — could not extract (corrupt or incomplete archive)")
+                        logging.warning(f"Extraction failed for {rel_name} (corrupt/incomplete; retry on re-run)")
+                        continue
+                    if not is_valid_archive_content(temp_dir):
+                        tqdm.write(f"Skipping {rel_name} — no model content (unsupported or nested archive)")
+                        logging.warning(f"No model content for {rel_name} (not written; retry on re-run)")
+                        continue
+                    content_dir = temp_dir
+                    base_name = clean_file_name(source_path.stem)
 
-                # Put the base name (stem) of the file at the front, then add all contained names
-                base_name = clean_file_name(path.stem)
+                # Put the base name at the front, then add all contained names
                 contained_names = " ".join(
                     clean_file_name(f.stem)
-                    for f in temp_dir.rglob("*")
+                    for f in content_dir.rglob("*")
                     if f.is_file() and f.suffix.lower() != ".txt"
                 )
                 joined_names = f"{base_name} {contained_names}".strip()

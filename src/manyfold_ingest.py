@@ -198,11 +198,13 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str],
     """Extract/copy a model's files into the Manyfold library folder.
 
     Archives are unpacked (a library scan won't look inside zips); loose
-    files are copied. Extracted contents are flattened into a single folder so
-    Manyfold registers one model per zip (see ``_flatten_into_root``). A
-    datapackage.json is written alongside so Manyfold imports the tags at scan
-    time. ``dest_name`` overrides the staged folder name so callers can avoid
-    basename collisions across --zips subfolders (see ``_staged_dir_names``).
+    files are copied; a directory source (a resolved loose-file folder unit,
+    see ModelTagger2-17z) has its whole subtree copied. Contents are flattened
+    into a single folder so Manyfold registers one model per source (see
+    ``_flatten_into_root``). A datapackage.json is written alongside so Manyfold
+    imports the tags at scan time. ``dest_name`` overrides the staged folder
+    name so callers can avoid basename collisions across --zips subfolders (see
+    ``_staged_dir_names``).
     """
     dest = library_path / (dest_name or _model_dir_name(archive.name))
     if dest.exists():
@@ -212,19 +214,27 @@ def stage_into_library(archive: Path, library_path: Path, tags: list[str],
     tmp = Path(tempfile.mkdtemp())
     try:
         staging = tmp / "model"
-        staging.mkdir()
-        # Archives, incl. a split set's first volume (e.g. .7z.001) whose ext
-        # isn't a recognized archive ext — patoolib detects it by content.
-        if ext in _ARCHIVE_EXTS or multipart_volume_number(archive.name) is not None:
-            patoolib.extract_archive(str(archive), outdir=str(staging))
-            extract_nested_archives(staging)  # unpack inner .zip/.rar bundles
+        # A directory source: copy the whole subtree, then flatten so Manyfold
+        # sees one model (each subfolder would otherwise be its own model).
+        if archive.is_dir():
+            shutil.copytree(archive, staging)
             if any(p.suffix.lower() in BAD_EXTS for p in staging.rglob("*") if p.is_file()):
-                raise ManyfoldError(f"Archive contains an executable: {archive.name}")
+                raise ManyfoldError(f"Folder contains an executable: {archive.name}")
             _flatten_into_root(staging)
-        elif ext in _LOOSE_EXTS:
-            shutil.copy(archive, staging / archive.name)
         else:
-            raise ManyfoldError(f"Unsupported file type: {archive.name}")
+            staging.mkdir()
+            # Archives, incl. a split set's first volume (e.g. .7z.001) whose ext
+            # isn't a recognized archive ext — patoolib detects it by content.
+            if ext in _ARCHIVE_EXTS or multipart_volume_number(archive.name) is not None:
+                patoolib.extract_archive(str(archive), outdir=str(staging))
+                extract_nested_archives(staging)  # unpack inner .zip/.rar bundles
+                if any(p.suffix.lower() in BAD_EXTS for p in staging.rglob("*") if p.is_file()):
+                    raise ManyfoldError(f"Archive contains an executable: {archive.name}")
+                _flatten_into_root(staging)
+            elif ext in _LOOSE_EXTS:
+                shutil.copy(archive, staging / archive.name)
+            else:
+                raise ManyfoldError(f"Unsupported file type: {archive.name}")
 
         with open(staging / "datapackage.json", "w", encoding="utf-8") as f:
             json.dump({
@@ -476,11 +486,16 @@ def run_upload(
                     staged_any = True
                     # Only remove the source AFTER a successful stage into B —
                     # and remove every volume of a multi-part set, not just the
-                    # first (which would orphan its siblings on disk).
+                    # first (which would orphan its siblings on disk). A folder
+                    # source (loose-file unit) is removed whole.
                     if delete_source:
-                        for v in multipart_volume_siblings(source):
-                            v.unlink(missing_ok=True)
+                        if source.is_dir():
+                            shutil.rmtree(source, ignore_errors=True)
                             stats["deleted_source"] += 1
+                        else:
+                            for v in multipart_volume_siblings(source):
+                                v.unlink(missing_ok=True)
+                                stats["deleted_source"] += 1
                 stats["staged"] += 1
         except Exception as e:
             # One bad archive or API hiccup must not kill a thousands-row sync

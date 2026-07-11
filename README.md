@@ -186,6 +186,18 @@ strongest subfaction accuracy). The cost across a whole library is dominated
 by the number of minis, not the model — a few tens of dollars even on Opus —
 so pick for quality.
 
+**`--loose-as-folders`** (tag): for libraries of *loose* model files (no
+archives), where a single kit is spread across nested folders, this groups a
+folder tree into the right number of models instead of tagging every `.stl`
+individually — one row + one LLM call per kit, each staged (flattened) as one
+Manyfold model. Boundary detection per folder: direct model files win (one
+model, fold subfolders in); a variant/wrapper folder (`OBJ`/`STL`/`Supported`)
+or a single child collapses; a mostly part-named folder (`body`/`wings`/…) is
+one kitbash; otherwise it splits into its real children and recurses. A folder
+that would split into more than 8 models is flagged for a human glance.
+Archives are unaffected (still one model each). Validated on the sample
+`files/` tree (58 loose files → 31 real sculpts).
+
 For each archive/file: extracts it, validates the contents (must contain a
 3D model or image; archives with executables are skipped), cleans the
 filenames (dates, symbols, and print-prep junk like "presupported"/"v2" are

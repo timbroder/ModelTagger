@@ -91,6 +91,10 @@ def _add_tag_opts(p):
     p.add_argument('--rerank', action='store_true', help='Rerank search results with cross-encoder')
     p.add_argument('--rerank-model', default='BAAI/bge-reranker-base', help='Cross-encoder model')
     p.add_argument('--token-budget', type=int, default=3000, help='Context token budget for RAG')
+    p.add_argument('--loose-as-folders', action='store_true',
+                   help='Group loose-file folder trees into one model per kit (descend/split '
+                        'boundary detection) instead of tagging every loose file individually. '
+                        'Archives are still one model each.')
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,6 +190,7 @@ def main():
             rerank=args.rerank,
             rerank_model=args.rerank_model,
             provider=args.provider,
+            loose_as_folders=args.loose_as_folders,
         )
 
     if args.step == 'upload':
