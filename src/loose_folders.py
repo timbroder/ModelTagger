@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from utils import MODEL_EXTS
+from utils import MODEL_EXTS, ARCHIVE_EXTS, multipart_volume_number
 
 # GUARD 1 — variant/wrapper folders. Their files flatten into the parent rather
 # than counting as separate models.
@@ -79,6 +79,38 @@ class ModelUnit:
     name (== the final component of rel_path by construction)."""
     rel_path: str
     name: str
+
+
+def _subtree_counts(folder: Path) -> tuple[int, int]:
+    """(archive files, loose model files) anywhere under ``folder``.
+
+    A multi-volume set counts as one archive (only its first volume)."""
+    archives = models = 0
+    for p in folder.rglob("*"):
+        if not p.is_file():
+            continue
+        suf = p.suffix.lower()
+        vol = multipart_volume_number(p.name)
+        if vol is not None:
+            archives += 1 if vol == 1 else 0
+        elif suf in ARCHIVE_EXTS:
+            archives += 1
+        elif suf in MODEL_EXTS:
+            models += 1
+    return archives, models
+
+
+def _is_archive_dominated(folder: Path) -> bool:
+    """True if ``folder``'s subtree is dominated by archives (archives present
+    and at least as many as loose model files).
+
+    Such a folder is an archive COLLECTION, not a loose-file kit: each archive
+    is already its own model via the normal archive pass, and any stray loose
+    files sitting among them are not a coherent kit. Grouping it would sweep all
+    the archives into one merged model, so loose grouping skips it entirely
+    (ModelTagger2-89r)."""
+    archives, models = _subtree_counts(folder)
+    return archives > 0 and archives >= models
 
 
 def _has_direct_model_files(folder: Path) -> bool:
@@ -151,6 +183,18 @@ def _resolve_folder(
     ``top``) into one or more ModelUnits, appending to ``units``."""
     def rel(p: Path) -> str:
         return p.relative_to(root).as_posix()
+
+    # 0. Archive-dominated: an archive COLLECTION, not a loose-file kit. Skip it
+    #    (never merge the archives into one model) — the archives are modeled
+    #    individually by the normal archive pass; stray loose files are left
+    #    un-grouped. See ModelTagger2-89r.
+    if _is_archive_dominated(folder):
+        archives, models = _subtree_counts(folder)
+        warnings.append(
+            f"{rel(folder)}: archive-dominated ({archives} archives vs {models} loose "
+            f"model files) — skipped loose grouping; archives are modeled individually"
+        )
+        return
 
     # 1. Direct model files win: this whole subtree is one model.
     if _has_direct_model_files(folder):
