@@ -18,7 +18,7 @@ import requests
 from tqdm import tqdm
 from utils import (
     slugify, clean_file_name, filter_query_tokens, _JUNK_TOKENS,
-    ARCHIVE_EXTS, LOOSE_EXTS, TAGGABLE_EXTS, BAD_EXTS,
+    ARCHIVE_EXTS, LOOSE_EXTS, DISCOVERABLE_EXTS, BAD_EXTS,
     multipart_volume_number, extract_nested_archives,
 )
 from loose_folders import resolve_model_units
@@ -545,7 +545,9 @@ def run_tagging(
     # A multi-volume set (name.partN.rar or split name.<ext>.NNN) is one model:
     # process only the first volume (the archiver pulls the rest from its
     # siblings) and skip continuations. The first volume of a split set (e.g.
-    # .7z.001) has a non-archive ext, so it's accepted here, not via TAGGABLE_EXTS.
+    # .7z.001) has a non-archive ext, so it's accepted here, not via DISCOVERABLE_EXTS.
+    # A lone image is a render, not a model, so it is NOT discovered on its own
+    # (DISCOVERABLE_EXTS excludes images); images still ride along inside archives.
     #
     # A work item is (rel_name, source_path, is_folder): a folder item is a
     # resolved loose-file model unit (tagged from its subtree, no extraction); a
@@ -578,7 +580,7 @@ def run_tagging(
             if vol is not None:
                 if vol != 1:
                     continue
-            elif path.suffix.lower() not in TAGGABLE_EXTS:
+            elif path.suffix.lower() not in DISCOVERABLE_EXTS:
                 continue
             discovered.append((path.relative_to(zips_dir).as_posix(), path, False))
 
