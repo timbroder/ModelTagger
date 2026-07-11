@@ -31,6 +31,7 @@ OWNED_NAMESPACES = [
     "faction", "subfaction", "unit", "model_type", "role", "allegiance",
     "equipment", "creature", "creature_type", "size", "class", "alignment",
     "terrain_type", "setting", "faction_theme", "function", "modular",
+    "grand_alliance",
 ]
 
 # Fuzzy-match floor for mapping CSV filenames onto scanned Manyfold model
