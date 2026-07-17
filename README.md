@@ -238,6 +238,12 @@ API level rather than hoped for in a prompt.
   told to ignore the context rather than weave noise into the tags.
 - `--mode warhammer|dnd` selects the prompt and field schema from
   `config/tagging_presets.json`; `--prompt-override` replaces the prompt.
+- `--faction <name>` pins the `faction` column to one value on every row — for
+  a **single-faction library** (e.g. a folder that's all Tyranids, run with
+  `--faction Tyranids`). The model still fills `unit`/`model_type`/`tags`; only
+  `faction` is forced, so there are no misclassified or blank factions and
+  everything collects under that faction on upload. (Only valid for modes with
+  a faction field.)
 - If generation fails, raw lore snippets are written as fallback tags and the
   failure is logged to `tagging.log`.
 - A **progress bar** (tqdm) shows overall tagging progress; per-file messages
