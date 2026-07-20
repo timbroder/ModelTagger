@@ -81,6 +81,27 @@ def test_variant_only_folder_is_one_model(tmp_path):
     assert paths == ["Tank"]
 
 
+def test_variant_folder_detection_covers_abbreviations():
+    from loose_folders import _is_variant_folder
+    for v in ["stl supp", "lys supp", "stl fin", "STL Fixed", "stl fin 01",
+              "obj", "Supported", "presupported"]:
+        assert _is_variant_folder(v), v
+    for real in ["Support Weapon", "Barbgants", "Genestealer 1", "Bios Voreus",
+                 "Neurogants"]:
+        assert not _is_variant_folder(real), real
+
+
+def test_abbreviated_variant_children_fold_into_parent(tmp_path):
+    # 'stl supp' / 'lys supp' / 'stl fin' are format variants, not separate
+    # models — the parent must stay ONE model, keeping its name (ModelTagger2-keh).
+    _mk(tmp_path,
+        "Neurogants/stl supp/m.stl",
+        "Neurogants/lys supp/m.lys",
+        "Neurogants/stl fin/m.stl")
+    paths, _ = _units(tmp_path)
+    assert paths == ["Neurogants"]
+
+
 def test_parts_kitbash_is_one_model(tmp_path):
     # >=3 children, >=60% part-named -> one kitbash model, not a split.
     _mk(

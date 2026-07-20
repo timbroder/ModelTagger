@@ -40,6 +40,20 @@ _VARIANT_EXACT = {"obj", "stl", "raw", "files", "lychee", "chitubox", "lys"}
 _VARIANT_SUBSTR = (
     "supported", "unsupported", "presupported", "pre-supported", "lychee", "chitubox",
 )
+# Format / print-prep tokens. A folder whose name is built ENTIRELY of these
+# (e.g. "stl supp", "lys supp", "stl fin", "STL Fixed") is a variant/wrapper of
+# one model, not a distinct model — it carries no model identity, so it folds
+# into its parent. Anything with a real word ("Support Weapon", "Genestealer 1")
+# is kept. See ModelTagger2-keh.
+_VARIANT_TOKENS = {
+    "obj", "stl", "raw", "file", "files", "lys", "lyt", "ctb", "chitubox",
+    "lychee", "gcode", "3mf",
+    "supported", "unsupported", "presupported", "presup", "unsup", "sup",
+    "supp", "supps", "nosupp", "supports", "support",
+    "fin", "final", "fixed", "fix", "repaired", "hollow", "hollowed", "solid",
+    "merged", "cut", "uncut", "split", "ready", "print", "prints", "printed",
+    "version", "ver",
+}
 
 # GUARD 2 — a folder whose children are mostly part-named is one kitbash model,
 # not a split. "part-like" = any token is one of these words.
@@ -131,7 +145,13 @@ def _subfolders(folder: Path) -> list[Path]:
 
 def _is_variant_folder(name: str) -> bool:
     low = name.strip().lower()
-    return low in _VARIANT_EXACT or any(s in low for s in _VARIANT_SUBSTR)
+    if low in _VARIANT_EXACT or any(s in low for s in _VARIANT_SUBSTR):
+        return True
+    # A name made up entirely of format/print-prep tokens (ignoring bare
+    # numbers) carries no model identity — e.g. "stl supp", "lys supp",
+    # "stl fin". A single real word ("Support Weapon") keeps it a model.
+    non_digit = [t for t in _tokens(name) if not t.isdigit()]
+    return bool(non_digit) and all(t.lower() in _VARIANT_TOKENS for t in non_digit)
 
 
 def _tokens(name: str) -> list[str]:
