@@ -95,6 +95,10 @@ def _add_tag_opts(p):
                    help='Group loose-file folder trees into one model per kit (descend/split '
                         'boundary detection) instead of tagging every loose file individually. '
                         'Archives are still one model each.')
+    p.add_argument('--faction',
+                   help='Pin the faction column to this value on every row (for a single-faction '
+                        "library, e.g. --faction Tyranids). The model still fills unit/model_type/"
+                        'tags; only faction is forced. Errors if the mode has no faction field.')
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -205,6 +209,7 @@ def main():
             rerank_model=args.rerank_model,
             provider=args.provider,
             loose_as_folders=args.loose_as_folders,
+            faction=args.faction,
         )
 
     if args.step == 'upload':

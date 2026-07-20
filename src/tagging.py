@@ -444,6 +444,7 @@ def run_tagging(
     rerank_model: str = "BAAI/bge-reranker-base",
     provider: str = "anthropic",
     loose_as_folders: bool = False,
+    faction: str | None = None,
 ) -> None:
     """Tag 3D model files using RAG with lore from the vector database.
 
@@ -454,6 +455,10 @@ def run_tagging(
     model per kit) via the descend/split boundary rule instead of tagging every
     loose file individually. Archives are still one model each. See
     ModelTagger2-17z / loose_folders.resolve_model_units.
+
+    faction: if set, force the 'faction' column to this value on every row (for
+    a single-faction library); the model still fills the other fields. See
+    ModelTagger2-nwu.
     """
     if use_local:
         provider = "local"
@@ -475,6 +480,16 @@ def run_tagging(
     else:
         fields = presets.get("fields", [])
         schema = build_schema(fields)
+
+    # --faction pins the faction column for a single-faction library. It only
+    # applies to modes that have a faction field; warn (don't block) if the
+    # value isn't one of the schema's enum values, in case of a typo.
+    if faction is not None:
+        if "faction" not in fields:
+            raise SystemExit(f"--faction is not valid for mode '{mode}' (it has no faction field)")
+        enum = (schema.get("properties", {}).get("faction", {}) or {}).get("enum")
+        if enum and faction not in enum:
+            print(f"[warn] --faction '{faction}' is not in the {mode} faction enum; using it anyway")
 
     if provider == "local":
         chosen_model = local_model
@@ -767,6 +782,11 @@ def run_tagging(
                         fallback()
                         continue
                     parsed = parse_structured(raw, fields)
+
+                # Single-faction library: force the faction, keeping the
+                # model-determined unit/model_type/tags/etc.
+                if faction is not None:
+                    parsed["faction"] = faction
 
                 tagged_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 writer.writerow(make_row(rel_name, parsed, tagged_at=tagged_at))
