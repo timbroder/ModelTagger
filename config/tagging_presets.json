@@ -13,7 +13,7 @@
       "properties": {
         "faction": {
           "type": "string",
-          "enum": ["Space Marines", "Adepta Sororitas", "Adeptus Custodes", "Adeptus Mechanicus", "Astra Militarum", "Grey Knights", "Imperial Knights", "Imperial Agents", "Chaos Space Marines", "Chaos Daemons", "Chaos Knights", "Death Guard", "Thousand Sons", "World Eaters", "Emperor's Children", "Aeldari", "Drukhari", "Orks", "Tyranids", "Genestealer Cults", "Necrons", "T'au Empire", "Leagues of Votann", "unknown"]
+          "enum": ["Space Marines", "Adepta Sororitas", "Adeptus Custodes", "Adeptus Mechanicus", "Astra Militarum", "Grey Knights", "Imperial Knights", "Imperial Agents", "Chaos Space Marines", "Chaos Daemons", "Chaos Knights", "Death Guard", "Thousand Sons", "World Eaters", "Emperor's Children", "Aeldari", "Drukhari", "Orks", "Tyranids", "Genestealer Cults", "Necrons", "T'au Empire", "Leagues of Votann", "Adeptus Titanicus", "unknown"]
         },
         "subfaction": {"type": "string"},
         "unit": {"type": "string"},
