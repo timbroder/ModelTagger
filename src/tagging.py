@@ -673,6 +673,12 @@ def run_tagging(
                     # Retrieve candidate chunks: prefer chunks from pages whose
                     # slug matches any n-gram of the file name (a strong on-topic
                     # signal), falling back to an unfiltered semantic query.
+                    # A slug n-gram can be an incidental generic word ("Mars" ->
+                    # the planet, "Lucius" -> a disambiguation page) that matches a
+                    # page unrelated to the model, so only trust the slug filter
+                    # when its best hit is also semantically close; otherwise the
+                    # unfiltered query is more on-topic (e.g. "Mars Warlord Titan"
+                    # -> Warlord Battle Titan, not the AdMech homeworld).
                     slugs = candidate_slugs(base_words)
                     results = None
                     slug_filtered = False
@@ -682,7 +688,7 @@ def run_tagging(
                             n_results=20,
                             where={"slug": {"$in": slugs}},
                         )
-                        if results["documents"][0]:
+                        if results["documents"][0] and results["distances"][0][0] <= _WEAK_CONTEXT_DISTANCE:
                             slug_filtered = True
                         else:
                             results = None
