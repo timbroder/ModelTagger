@@ -491,6 +491,17 @@ def run_tagging(
         if enum and faction not in enum:
             print(f"[warn] --faction '{faction}' is not in the {mode} faction enum; using it anyway")
 
+    # Imperial god-engine Titans (Warlord/Warhound/Reaver/Warbringer/Emperor)
+    # are always Adeptus Titanicus, but retrieval can feed misleading lore for
+    # ambiguously-named files (e.g. "Lucius Pattern Reaver" pulls Lucius forge-
+    # world/character pages), so the model occasionally picks a nearby Imperial
+    # faction. Pin it deterministically after generation — but only when the
+    # mode actually recognizes the faction (warhammer), so AoS/terrain/dnd are
+    # unaffected. Knights are model_type=Walker; xenos/Chaos titans keep the
+    # model's faction (allegiance != Imperium).
+    _faction_enum = (schema.get("properties", {}).get("faction", {}) or {}).get("enum") or []
+    titanicus_faction = "Adeptus Titanicus" if "Adeptus Titanicus" in _faction_enum else None
+
     if provider == "local":
         chosen_model = local_model
     else:
@@ -790,9 +801,15 @@ def run_tagging(
                     parsed = parse_structured(raw, fields)
 
                 # Single-faction library: force the faction, keeping the
-                # model-determined unit/model_type/tags/etc.
+                # model-determined unit/model_type/tags/etc. An explicit
+                # --faction pin wins; otherwise pin Imperial Titans to Adeptus
+                # Titanicus (see titanicus_faction above).
                 if faction is not None:
                     parsed["faction"] = faction
+                elif (titanicus_faction
+                      and parsed.get("model_type") == "Titan"
+                      and parsed.get("allegiance") == "Imperium"):
+                    parsed["faction"] = titanicus_faction
 
                 tagged_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 writer.writerow(make_row(rel_name, parsed, tagged_at=tagged_at))
