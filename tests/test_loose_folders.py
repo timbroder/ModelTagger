@@ -189,6 +189,34 @@ def test_pure_loose_kit_still_groups(tmp_path):
     assert warnings == []
 
 
+def test_archive_dominated_parent_still_groups_archive_free_subtree(tmp_path):
+    # An archive-dominated parent (many archives) with a genuine loose kit in an
+    # archive-FREE subfolder: the archives are skipped, but the loose sub-kit is
+    # still grouped (ModelTagger2-9ei). Mirrors FOLDER2/imperial knights/Cerastus.
+    zips = tmp_path / "zips"
+    archives = [f"Knights/kit{i}.zip" for i in range(10)]
+    upgrades = ["Knights/Upgrades/Bolt Cannon/arm.stl",
+                "Knights/Upgrades/Bolt Cannon/ammo.stl",
+                "Knights/Upgrades/Warblade/blade.stl",
+                "Knights/Upgrades/Warblade/body.stl"]
+    _mk_files(zips, *archives, *upgrades)
+    paths, warnings = _units(zips)
+    # Each archive-free weapon folder becomes its own model; archives untouched.
+    assert paths == ["Knights/Upgrades/Bolt Cannon", "Knights/Upgrades/Warblade"]
+    assert any("grouped 2 loose sub-kit(s)" in w for w in warnings)
+
+
+def test_archive_dominated_with_only_direct_loose_files_skips(tmp_path):
+    # No archive-free SUBTREE — the loose files are direct stragglers among the
+    # archives -> nothing grouped (the 89r behavior is preserved).
+    zips = tmp_path / "zips"
+    archives = [f"KUH/kit{i}.zip" for i in range(10)]
+    _mk_files(zips, *archives, "KUH/face.stl", "KUH/banner.stl")
+    units, warnings = resolve_model_units(zips)
+    assert units == []
+    assert any("loose files skipped" in w for w in warnings)
+
+
 def test_loose_kit_with_one_stray_archive_still_groups(tmp_path):
     # Loose files dominate (5 loose vs 1 archive) -> still grouped as a kit.
     zips = tmp_path / "zips"
