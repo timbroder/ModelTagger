@@ -204,15 +204,26 @@ def _resolve_folder(
     def rel(p: Path) -> str:
         return p.relative_to(root).as_posix()
 
-    # 0. Archive-dominated: an archive COLLECTION, not a loose-file kit. Skip it
-    #    (never merge the archives into one model) — the archives are modeled
-    #    individually by the normal archive pass; stray loose files are left
-    #    un-grouped. See ModelTagger2-89r.
+    # 0. Archive-dominated at THIS level: an archive COLLECTION, so never merge
+    #    its archives into one model (the archive pass models them individually,
+    #    and direct loose files sitting among them are stragglers, not a kit).
+    #    But an archive-dominated parent can still contain archive-FREE subtrees
+    #    that ARE genuine loose kits, so descend into its model-bearing
+    #    subfolders and resolve each — the recursion re-applies this guard, so
+    #    only archive-free sub-branches get grouped. Direct loose files at this
+    #    level (not in a subfolder) are left un-grouped. See ModelTagger2-89r /
+    #    ModelTagger2-9ei.
     if _is_archive_dominated(folder):
         archives, models = _subtree_counts(folder)
+        before = len(units)
+        for child in _model_bearing_real_children(folder):
+            _resolve_folder(child, root, child, child.name, units, warnings)
+        grouped = len(units) - before
         warnings.append(
             f"{rel(folder)}: archive-dominated ({archives} archives vs {models} loose "
-            f"model files) — skipped loose grouping; archives are modeled individually"
+            f"model files); archives modeled individually"
+            + (f"; grouped {grouped} loose sub-kit(s)" if grouped
+               else "; loose files skipped")
         )
         return
 
