@@ -313,6 +313,12 @@ How the sync works:
   Unassigned because their staged name drifted from the CSV filename (name
   collisions at scale). Idempotent, honors keep-manual, respects `--dry-run`
   and `--limit`.
+- **Terrain fallback**: on both the CSV sync and `--reconcile-collections`,
+  when the primary collection value is blank (e.g. no faction) but the model is
+  clearly terrain — `model_type: Terrain`, or a terrain cue word (bunker, ruin,
+  wall, tower, container, statue, …) in its name/tags — it's assigned to a
+  `Terrain` collection instead of landing Unassigned. Only fires when the
+  primary value is blank, so a real faction always wins.
 - **`prune --names <file>`** bulk-deletes models by an exact-name list (one
   name per line) — for clearing junk/stray models (orphan render images, loose
   bits). Matching is exact and case-insensitive; a name that matches no model

@@ -291,6 +291,43 @@ def _tag_value(tags: list[str], field: str) -> str:
     return ""
 
 
+# Fallback collection for terrain when the primary collection field (faction) is
+# blank — so a bunker/ruin/wall doesn't land Unassigned. See ModelTagger2-y17.
+TERRAIN_COLLECTION = "Terrain"
+
+# Word-boundary cues that mark a model as terrain/scenery (matched as whole
+# tokens against the name + tags, so 'wall' won't hit 'wallet').
+_TERRAIN_CUES = {
+    "terrain", "scenery", "building", "buildings", "ruin", "ruins",
+    "fortification", "wall", "walls", "barricade", "barricades", "tower",
+    "towers", "bunker", "bunkers", "gate", "door", "doors", "bridge", "walkway",
+    "platform", "emplacement", "turret", "objective", "monument", "container",
+    "containers", "pipe", "pipes", "conduit", "generator", "statue", "statues",
+    "manufactorum", "sanctum", "sector", "scatter", "fence", "crate", "barrel",
+    "sandbag", "sandbags", "rubble", "trench",
+}
+
+
+def _looks_like_terrain(model_type: str, text: str) -> bool:
+    """True if a model is terrain: model_type == 'Terrain', or a terrain cue
+    word appears as a whole token in ``text`` (its name + tags)."""
+    if model_type.strip().lower() == "terrain":
+        return True
+    tokens = {t for t in re.split(r"[^a-z0-9]+", text.lower()) if t}
+    return bool(tokens & _TERRAIN_CUES)
+
+
+def _row_is_terrain(row: dict) -> bool:
+    """Terrain check for a CSV row (uses its model_type + filename/unit/tags)."""
+    text = " ".join(str(row.get(k, "")) for k in ("filename", "unit", "tags"))
+    return _looks_like_terrain(str(row.get("model_type", "")), text)
+
+
+def _tags_are_terrain(tags: list[str]) -> bool:
+    """Terrain check for a scanned model (uses its 'model_type:' tag + all tags)."""
+    return _looks_like_terrain(_tag_value(tags, "model_type"), " ".join(tags))
+
+
 def reconcile_model_collections(
     client: ManyfoldClient,
     collection_field: str = "faction",
@@ -337,7 +374,12 @@ def reconcile_model_collections(
             if detail.get("isPartOf"):
                 stats["already_assigned"] += 1
                 continue
-            value = _tag_value(model_tags(detail), collection_field)
+            model_tag_list = model_tags(detail)
+            value = _tag_value(model_tag_list, collection_field)
+            # Terrain fallback: no primary collection tag but clearly terrain ->
+            # a Terrain collection instead of Unassigned (ModelTagger2-y17).
+            if not value and _tags_are_terrain(model_tag_list):
+                value = TERRAIN_COLLECTION
             if not value:
                 stats["no_tag"] += 1
                 continue
@@ -468,6 +510,11 @@ def run_upload(
                 if sorted(merged) != sorted(existing):
                     attributes["keywords"] = merged
                 coll_value = (row.get(collection_field) or "").strip()
+                # Terrain fallback: no primary collection value (e.g. blank
+                # faction) but the model is clearly terrain -> a Terrain
+                # collection instead of Unassigned (ModelTagger2-y17).
+                if not coll_value and _row_is_terrain(row):
+                    coll_value = TERRAIN_COLLECTION
                 if coll_value and not detail.get("isPartOf"):
                     coll = ensure_collection(coll_value)
                     cid = (coll or {}).get("@id") or (coll or {}).get("id")
