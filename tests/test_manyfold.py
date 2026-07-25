@@ -261,6 +261,30 @@ def test_request_rewrites_internal_host():
     assert mock_req.call_args.args[1] == "https://mf.example/models/abc?page=2"
 
 
+def test_request_uses_configured_timeout():
+    # Default is high so slow-but-successful calls aren't misread as failures.
+    default = ManyfoldClient("https://mf.example", token="tok", min_interval=0)
+    with patch("manyfold.requests.request", return_value=_resp(200)) as mock_req:
+        default._request("GET", "/models")
+    assert mock_req.call_args.kwargs["timeout"] >= 150
+
+    custom = ManyfoldClient("https://mf.example", token="tok", min_interval=0, timeout=42)
+    with patch("manyfold.requests.request", return_value=_resp(200)) as mock_req:
+        custom._request("GET", "/models")
+    assert mock_req.call_args.kwargs["timeout"] == 42
+
+
+def test_make_client_reads_timeout_and_interval_env(monkeypatch):
+    from manyfold_ingest import _make_client
+    monkeypatch.setenv("MANYFOLD_API_URL", "https://mf.example")
+    monkeypatch.setenv("MANYFOLD_API_TOKEN", "tok")
+    monkeypatch.setenv("MANYFOLD_TIMEOUT", "300")
+    monkeypatch.setenv("MANYFOLD_MIN_INTERVAL", "0.5")
+    client = _make_client()
+    assert client._timeout == 300.0
+    assert client._min_interval == 0.5
+
+
 # --- staging --------------------------------------------------------------
 
 def test_stage_into_library_loose_file(tmp_path):

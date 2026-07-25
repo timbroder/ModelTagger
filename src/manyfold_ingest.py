@@ -264,12 +264,21 @@ def _make_client() -> ManyfoldClient | None:
     if not api_url:
         print("Error: MANYFOLD_API_URL environment variable required.")
         return None
+    # Optional tuning for slow/self-hosted instances: raise the per-request
+    # timeout (a slow detail call must not be misread as a failure) and relax
+    # the request pacing to avoid degrading a small instance over a long run.
+    kwargs: dict = {}
+    if os.getenv("MANYFOLD_TIMEOUT"):
+        kwargs["timeout"] = float(os.environ["MANYFOLD_TIMEOUT"])
+    if os.getenv("MANYFOLD_MIN_INTERVAL"):
+        kwargs["min_interval"] = float(os.environ["MANYFOLD_MIN_INTERVAL"])
     return ManyfoldClient(
         api_url,
         token=os.getenv("MANYFOLD_API_TOKEN"),
         client_id=os.getenv("MANYFOLD_CLIENT_ID"),
         client_secret=os.getenv("MANYFOLD_CLIENT_SECRET"),
         scopes=os.getenv("MANYFOLD_SCOPES", "public read write"),
+        **kwargs,
     )
 
 

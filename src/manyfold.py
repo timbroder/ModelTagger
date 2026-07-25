@@ -77,6 +77,7 @@ class ManyfoldClient:
         client_secret: str | None = None,
         scopes: str = "public read write",
         min_interval: float = 0.25,
+        timeout: float = 180.0,
     ):
         # REST resources and /oauth/token live at the root; only the docs are
         # under /api. Tolerate a pasted docs URL by stripping a trailing
@@ -89,6 +90,12 @@ class ManyfoldClient:
         self._rate_lock = threading.Lock()
         self._last_request = 0.0
         self._min_interval = min_interval
+        # Per-request HTTP timeout. Kept high on purpose: a slow self-hosted
+        # instance under a long sequential run (e.g. reconcile's per-model detail
+        # fetches) can take far longer than the old 60s on some calls — and a
+        # slow-but-successful response must not be misread as a failure. Tune
+        # via MANYFOLD_TIMEOUT (see _make_client).
+        self._timeout = timeout
 
     # --- plumbing ---------------------------------------------------------
 
@@ -150,7 +157,7 @@ class ManyfoldClient:
             if gap > 0:
                 time.sleep(gap)
             try:
-                resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
+                resp = requests.request(method, url, headers=headers, timeout=self._timeout, **kwargs)
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 last_status = str(e)
                 time.sleep(min(30, 2 * 2 ** attempt))
