@@ -296,6 +296,13 @@ Environment: `MANYFOLD_API_URL` plus either `MANYFOLD_API_TOKEN` or
 `MANYFOLD_CLIENT_ID`/`MANYFOLD_CLIENT_SECRET` (OAuth client credentials).
 `MANYFOLD_LIBRARY_PATH` can replace `--library-path`.
 
+For a **slow or self-hosted instance** (where a long pass like
+`--reconcile-collections` fetches thousands of models and some detail calls run
+slow), two optional knobs keep slow-but-successful calls from being misread as
+errors: `MANYFOLD_TIMEOUT` (per-request HTTP timeout in seconds, default 180)
+and `MANYFOLD_MIN_INTERVAL` (min seconds between requests, default 0.25 — raise
+it to pace gently and avoid overloading a small instance).
+
 How the sync works:
 
 - **Models already in Manyfold** (matched by normalized name, with a
