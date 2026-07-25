@@ -23,9 +23,14 @@
 #   DRY_RUN=false docker compose exec web bin/rails runner assign_collections.rb   # APPLY
 #   (or paste the whole file into `bin/rails console`)
 #
-# VERIFY ONCE against the running source: `keywords_for` reads a model's tags
-# (our datapackage "keywords"). `tag_list` is the acts-as-taggable-on accessor;
-# if Manyfold uses a different association/context, adjust that one method.
+# Verified against the Manyfold source (v0.146.0 / main):
+#   - app/models/model.rb: `acts_as_taggable_on :tags` -> `model.tag_list` holds
+#     the model's tags, and ModelDeserializer maps `tag_list: @object["keywords"]`,
+#     so our datapackage "keywords" (faction:/model_type:/...) ARE the tag_list.
+#   - Model<->Collection is a has_many; the fix's own spec does
+#     `model.update(collections: [collection_record])`, i.e. the `collections`
+#     association holds Collection records — the same mechanism this script uses.
+# (Ref: timbroder/manyfold PR #1, which fixes the isPartOf 500 upstream.)
 
 require "set"
 
@@ -41,9 +46,8 @@ TERRAIN_CUES = %w[
   sandbag sandbags rubble trench
 ].to_set
 
-# How a model's tags (our datapackage "keywords") are read. tag_list is the
-# acts-as-taggable-on accessor; swap to `model.tags.map(&:name)` (or the real
-# context) if the source differs.
+# A model's tags (our datapackage "keywords"). `acts_as_taggable_on :tags`
+# provides tag_list; the fallback is just belt-and-suspenders.
 def keywords_for(model)
   return Array(model.tag_list) if model.respond_to?(:tag_list)
   model.tags.map(&:name)
@@ -75,7 +79,7 @@ examples = []
 cache    = {}
 seen     = 0
 
-Model.includes(:collections).find_each do |model|
+Model.includes(:collections, :tags).find_each do |model|
   break if LIMIT && seen >= LIMIT
   seen += 1
   begin
