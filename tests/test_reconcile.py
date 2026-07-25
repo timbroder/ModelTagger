@@ -116,6 +116,22 @@ def test_reconcile_dry_run_writes_nothing():
     client.update_model.assert_not_called()
 
 
+def test_reconcile_dry_run_new_collection_counts_as_assigned_not_error():
+    # The collection does NOT exist yet (list_collections empty). A dry-run must
+    # count these as would-assign, not errors (the phantom-732 bug, MT-4k8).
+    models = [
+        {"id": 1, "name": "A", "keywords": ["faction: Orks"]},
+        {"id": 2, "name": "B", "keywords": ["faction: Necrons"]},
+    ]
+    client = _client(models)              # list_collections returns [] -> all new
+    stats = reconcile_model_collections(client, "faction", dry_run=True)
+
+    assert stats["assigned"] == 2
+    assert stats["errors"] == 0           # was 2 before the fix
+    client.create_collection.assert_not_called()   # dry-run creates nothing
+    client.update_model.assert_not_called()
+
+
 # --- run_upload --reconcile-collections wiring ----------------------------
 
 def test_run_upload_reconcile_flag_skips_csv(tmp_path, monkeypatch):

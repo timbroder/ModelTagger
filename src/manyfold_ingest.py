@@ -366,7 +366,12 @@ def reconcile_model_collections(
         if key in collections:
             return collections[key]
         if dry_run:
-            collections[key] = {"name": name, "_planned": True}
+            # A collection that would be CREATED on a real run. Carry a
+            # placeholder @id so callers see a valid (planned) id — otherwise a
+            # would-be-new collection reads as an id-less failure and inflates
+            # the error count (ModelTagger2-4k8). The id is never sent anywhere
+            # because writes are guarded by `if dry_run`.
+            collections[key] = {"@id": f"__planned__:{name}", "name": name, "_planned": True}
             return collections[key]
         created = client.create_collection(name)
         collections[key] = created
@@ -481,7 +486,10 @@ def run_upload(
         if key in collections:
             return collections[key]
         if dry_run:
-            collections[key] = {"name": name, "_planned": True}
+            # Placeholder @id for a would-be-created collection so the dry-run
+            # plan reflects the assignment (see ModelTagger2-4k8). Never sent —
+            # writes are guarded by `if dry_run`.
+            collections[key] = {"@id": f"__planned__:{name}", "name": name, "_planned": True}
             return collections[key]
         created = client.create_collection(name)
         collections[key] = created
